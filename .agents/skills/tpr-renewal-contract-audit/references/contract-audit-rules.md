@@ -28,7 +28,8 @@
 | --- | --- | --- |
 | 正式 TPR | `1rZVU-n85eDh_ueaRyQojP8dSm4-MTeBz8frIyZynnb4` / `TPR` | 唯讀 |
 | Renewal DB | `1tUOct-cJJY8854EAph9D0cxfiKz4qD1HFR2nXkPKWnc` / `{YYYYMM}` | 唯讀 |
-| 方案參照表 | `1QhNSdtg5TueFSoNBY8lFxXbtp_UktY1g8l7EUQWJ5kU` | 唯讀 |
+| RSV／RwG 方案參照表 | `10ECF2b0yu6loRZqDl_4ynHOuc2yz-IAUjPirCj-dxvM` / `TMS 方案` | 唯讀 |
+| Deposit 方案參照表 | `1QhNSdtg5TueFSoNBY8lFxXbtp_UktY1g8l7EUQWJ5kU` / `訂金方案` | 唯讀 |
 | 測試工作簿 | `1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4` | 可寫測試分頁 |
 | Apps Script | `1ideFb9UwKgQRheGCwInd7fxt5ZklqUrIK7EEbGnCOHOfHi06L1Ty3IfK` | 經使用者要求才修改 |
 
@@ -37,7 +38,7 @@
 ### 1.2 寫入邊界
 
 - 可寫：`TPR Update Queue`、`Contract Evidence Review`、`Plan Classification Review`、`Special Approval Review`、`Share Group Review`、`Audit Log` 及明確的設定表。
-- 不可自行寫入：正式 TPR、Renewal DB、方案參照來源。
+- 不可自行寫入：正式 TPR、Renewal DB、方案參照數值。唯一例外是經使用者授權後，程式可在 RSV／RwG 官方方案表新增並維護永久 `Plan Code` 欄；不得藉此修改任何方案內容。
 - `Check=TRUE` 只代表測試 Queue 通過，不代表已獲授權寫回正式 TPR。
 
 ## 2. 完整處理流程
@@ -120,6 +121,8 @@
 
 文件名稱、OCR 成功或檔案存在都不等於已確認。掃描 PDF／照片必須逐頁目視；店名換行、空白或常見 OCR 異體字需先正規化再比較。
 
+Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件必須閱讀其中所有與本次續約相關的檔案；`Reviewed Evidence File ID` 綁定 Queue 連結本身的檔案 ID 或資料夾 ID，並記錄實際覆核內容的檔案版本。`/file/d/<id>`、`/d/<id>`、`/folders/<id>` 與 `?id=<id>` 都是有效 Drive 連結格式。Queue 連結 ID 與覆核 ID 不一致時必須 `Check=FALSE` 並重新閱讀目前連結，不得沿用舊覆核。
+
 ## 6. 原方案續約與方案變更
 
 ### 6.1 原方案續約可接受的證據
@@ -133,7 +136,7 @@
 
 ### 6.2 不視為換方案的正規化
 
-- 原主產品年繳、加購月繳，續約轉換時將加購換成 `月費 × 12` 的年繳表示。
+- 原主產品年繳、加購月繳，續約轉換時將加購換成 `月費 × 12` 的年繳表示。這是單向正規化；不得反向將原年繳 add-on 改為月繳並視為原方案。
 - 原合約為短約且金額／付費組數經 prorate，續約恢復完整一年與完整年度金額／組數。
 - RSV 贈送組數空白與 0。
 - Deposit 的不適用數值空白與 0，在合約也沒有對應費用時。
@@ -143,7 +146,7 @@
 以下均屬實質變更：
 
 - 產品新增或移除。
-- 使用組數、贈送組數、價格、付款週期或 Deposit 費率有實質改變。
+- 使用組數、贈送組數、價格、付款週期或 Deposit 費率有實質改變；但第 6.2 節的 add-on `monthly → annual` 單向正規化除外。
 - Share Plan 加入、退出或 ID 改變。
 - 方案家族改變。
 
@@ -153,9 +156,12 @@
 
 ### 7.1 主產品 annual
 
-- Queue 轉換後的正費用加購原則上也寫為 annual，年度金額為月費 × 12。
-- 合約年繳總額＝RSV 年費＋全部正費用加購年度金額：加購可判定為年繳。
-- 合約年繳總額＝RSV 年費，且合約另列正數加購月費：加購可能為月繳，`Check=FALSE`，Note 要求人工確認。
+- Queue 轉換後的正費用 add-on 原則上寫為 annual，年度金額為月費 × 12；這是原方案續約的單向正規化。
+- 從雙方用印合約或合格的完整 Email 串擷取文件明載的「年繳總額」。`Annual Payment Amount (NTD)` 必須是文件字面金額，並同時記錄 `Annual Payment Evidence Quote` 與 `Annual Payment Evidence Location`；不得由 Queue 加總回推。
+- 文件年繳總額只與該 Branch 的 Queue 中 `付款週期=annual` 的固定方案合約價格加總比較。只正規化幣別文字、千分位與空白後做精確數值相等比較；不得容許 ±1 元或其他誤差。
+- Queue 的 monthly add-on 不納入年繳總額；其月費仍必須在完整方案覆核中與文件逐項精確相等。交易費、抽成、信用卡處理費、超額與用量變動費用不納入固定年繳總額。
+- RSV 年繳但任一正費用 add-on 續約後仍為 monthly 時，定義為 split-billing 例外。只有雙方用印合約可以支持，單純 Email 同意不足；Queue 必須保留該 add-on 為 monthly，文件年繳總額只包含 annual rows。
+- 文件年繳總額、原文、位置、Queue annual 金額或 split-billing 用印任一缺失，或文件總額與 Queue annual 合計不完全相等，整個 Branch `Check=FALSE`；Note 必須列出文件總額、Queue 年繳合計、各 annual 產品金額與下一步。程式不得自動改寫 Queue 價格或付款週期。
 - 價格為 0 的 Deposit／加購不影響年繳總額；例如 RSV 年費 12,000、Deposit 月費 0，總額 12,000 時可維持 Deposit annual。
 - 無正費用加購時，不得只因沒有填年繳總額而阻擋。
 
@@ -206,13 +212,30 @@
 
 方案家族至少分為 `Public`、`BD New`、`Special`。
 
+- 新方案參照的 `公版方案`、`Lite 方案`、`Email Only 方案` 均屬 `Public` 合規家族；來源方案名稱仍須保留供追溯。
+- `BD 新方案` 屬 `BD New` 合規家族。
+- 方案參照必須以同一來源列的產品、付款週期、使用組數、贈送組數、價格與超額單價作為不可拆分的完整組合，不得跨列拼湊。
+- 正常流程只從測試工作簿的 `Legacy Branch Master` 讀取 Legacy cohort membership；`Build Queue` 與 `Run Contract Audit` 均不得掃描正式工作簿的 `Raw : TPR`。
+- `Legacy Branch Master` 的 `Branch ID` 是方案世代的 membership 權威。`first contract date` 若存在只供追溯，不參與 Public／BD New 的 runtime 分類；日期空白或無法判讀不阻擋，但 Duplicate Branch ID 必須讓受影響 Branch `Check=FALSE`，Note 列出重複 rows。
+- 舊方案完整組合只匹配 Public 時，不論是否列在 Legacy，均判為 `Public` 並以 Public 家族續約。
+- 舊方案完整組合只匹配 BD New 時，Branch 不在 Legacy 才判為 `BD New`；若已列入 Legacy，membership 與方案家族衝突，必須人工確認。
+- 舊方案完整組合同時匹配 Public／BD New 時，列在 Legacy 選擇 `Public`，不在 Legacy 選擇 `BD New`，並在 trace 說明是由 membership 解決重複組合。
+- 新方案若同時匹配 Public／BD New，依已確認的舊方案家族選擇，確保續約維持原家族。Public ↔ BD New 不得自動轉換，須特殊申請／人工確認。
+- 舊方案為 Special 或完全無法匹配時原則上需人工確認；舊／新完整商業方案相同的 `Special → Special` 可依既有特殊方案延續規則判斷。Special 改為標準方案時，列在 Legacy 的目標為完整 Public，不在 Legacy 的目標為完整 BD New；符合目標且有雙方用印時不需額外特殊申請。
+- 合約起訖日不屬於方案身分；期間另由合約日期檢核。比較 Special 是否為同一方案時須比較主產品、全部 add-on、付款週期正規化、使用／贈送組數、價格、Share、超額及 Deposit 條件。
+- 人工案件先寫 `Check=FALSE` 與具體 Note；使用者可直接在 Queue 勾選，但下次重跑會重新計算並覆蓋。不要建立永久人工世代 Override。
+- `Plan Classification Review!Complete Plan Match` 明確填入 `FALSE`／`Fail` 時是人工 veto，Branch 不得 Ready；空白或 TRUE 仍繼續自動 Catalog 判斷，TRUE 不得覆蓋自動 conflict。
+- `Canonical Plan Catalog` 以永久 `Plan Code` 及版本保存已確認方案；既有方案異動沿用原代碼並新增版本，新方案才建立新代碼。
+- RSV／RwG 的 `Plan Reference Mapping` 必須由同步流程依官方 `TMS 方案` 的 row-package 欄位重建；不得再保留舊公版／BD 分頁的 column-package Mapping。Deposit Mapping 原封保留。
+- 官方方案表的既有方案修改或刪除，必須進入 `Plan Catalog Change Review`。尚未核准時沿用上一個已確認版本，受影響 Branch 不得通過；其他 Branch 不受影響。刪除核准後標為 `Inactive`，不得刪除歷史版本。
+
 | 舊方案 → 新方案 | 特殊申請 |
 | --- | --- |
 | Public → 完整 Public | 不需；若內容有變仍須雙方用印 |
 | BD New → 完整 BD New | 不需；若內容有變仍須雙方用印 |
 | Public ↔ BD New | 需特殊申請／人工確認 |
 | Special → 完全相同 Special | 既有特殊方案延續，不需重新申請 |
-| Special → 完整 Public | 已有雙方用印合約時，不需額外特殊申請 |
+| Special → Legacy membership 對應的完整 Public／BD New | 已有雙方用印合約時，不需額外特殊申請 |
 | Special 有實質異動或新方案仍非完整公版／BD 組合 | 需特殊申請 |
 | 無法確認方案家族或完整組合 | 不得通過，Note 說明缺少哪個對應 |
 
@@ -252,8 +275,8 @@
 
 | 分頁 | 必填內容 |
 | --- | --- |
-| Contract Evidence Review | 證據類型、名稱／期間／完整方案、客戶同意、指定信箱、雙方用印、付款週期、文件日期、Deposit 費率、覆核者、日期、狀態、Notes |
-| Plan Classification Review | 舊／新方案家族、完整組合判斷、覆核者、日期、Notes |
+| Contract Evidence Review | 證據類型、名稱／期間／完整方案、客戶同意、指定信箱、雙方用印、付款週期、文件日期、Deposit 費率、文件年繳總額及其逐字原文／位置、覆核者、日期、狀態、Notes |
+| Plan Classification Review | Legacy membership、選填首約日、預期家族、舊／新方案家族、舊／新 Plan Code、匹配規則、例外、覆核者、日期、Notes；明確 FALSE／Fail 為人工 veto |
 | Special Approval Review | 是否需要、核准狀態、佐證、覆核者、日期、Notes |
 | Share Group Review | 成員、統編、合約、超額單價、狀態、覆核者、日期、Notes |
 
@@ -288,7 +311,7 @@
 - 所有 `Check=FALSE` 列的 Note 均非空白。
 - 每個 Branch 的合約證據都已覆核。
 - 所有特殊申請與 Share Plan 都有對應狀態。
-- Audit Log 已新增本次批次紀錄。
+- Audit Log 已新增本次批次紀錄；Build Queue 的 Operation 為 `Build Queue`，合約稽核的 Operation 為 `Contract Audit`，不得混用。
 - Queue 畫面重新整理後，Check 與 Note 可見且格式正常。
 
 回報時同時列出 Branch 數與產品列數，避免將兩者混為一談。
@@ -299,6 +322,8 @@
 | --- | --- |
 | Renewal DB 插入、改名或新增欄位 | `Field Mapping` |
 | 新公版、BD、Deposit 方案 | 方案參照及 Plan Reference Mapping |
+| RSV／RwG 既有方案修改、刪除或新增 | 官方方案表 `Plan Code`、`Canonical Plan Catalog`、`Plan Catalog Change Review`；既有修改／刪除須核准 |
+| Legacy cohort 分頁／Branch ID 欄名 | `Control` 的 `Legacy Branch Master Tab`、`Legacy Branch ID Header`；首約日期只供選填追溯 |
 | 新產品或展開方式 | Product Expansion Rules |
 | 贈送比例等門檻 | `Control` |
 | 新的業務判斷規則 | 本文件 |

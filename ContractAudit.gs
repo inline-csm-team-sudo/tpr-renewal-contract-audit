@@ -17,11 +17,20 @@ const AUDIT2_EVIDENCE_HEADERS = [
   'Branch ID', 'Evidence URL', 'Evidence Type', 'Restaurant Name Match',
   'Contract Period Match', 'Full Plan Match', 'Customer Explicit Consent',
   'Agreement Confirmation Text', 'Confirmation Sender', 'Inline Seal',
-  'Customer Seal', 'Reviewer', 'Reviewed At', 'Status', 'Notes'
+  'Customer Seal', 'Reviewer', 'Reviewed At', 'Status', 'Notes',
+  'Annual Payment Amount (NTD)', 'Billing Cycle Match',
+  'Contract Start Date', 'Contract End Date',
+  'Deposit Commission Rate (%)', 'Deposit Buy-in Price (%)',
+  'Document Restaurant Name', 'Document Legal Entity Name',
+  'Restaurant Name Match Result', 'Restaurant Alias Evidence',
+  'Reviewed Evidence File ID', 'Reviewed Evidence Modified At',
+  'Annual Payment Evidence Quote', 'Annual Payment Evidence Location'
 ];
 const AUDIT2_PLAN_HEADERS = [
   'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
-  'Reviewer', 'Reviewed At', 'Notes'
+  'Reviewer', 'Reviewed At', 'Notes',
+  'First Contract Start Date', 'Expected Plan Family', 'Original Plan Code',
+  'New Plan Code', 'Catalog Match Rule', 'Catalog Exception', 'Origin Source'
 ];
 const AUDIT2_SPECIAL_HEADERS = [
   'Branch ID', 'Approval Status', 'Evidence URL', 'Reviewer', 'Reviewed At', 'Notes'
@@ -49,70 +58,7 @@ function audit2OnOpen() {
 // RenewalQueue.gs#runContractAudit so both the Queue build and audit share
 // the same original-renewal and prorate rules.
 function runContractAuditLegacy() {
-  const ss = SpreadsheetApp.openById(AUDIT2_TEST_BOOK_ID);
-  const queue = ss.getSheetByName(AUDIT2_QUEUE_TAB);
-  if (!queue || queue.getLastRow() < 2) throw new Error('TPR Update Queue has no data. Build Queue first.');
-  audit2EnsureQueueHeaders_(queue);
-  audit2SetupReviewSheets_(ss, queue);
-
-  const qv = queue.getDataRange().getValues();
-  const qx = audit2Index_(qv[0]);
-  ['Check', 'Note', 'Branch ID', '合約', 'Original TPR Row', 'Transformation Status'].forEach(h => audit2Col_(qx, h));
-  const tpr = SpreadsheetApp.openById(AUDIT2_TPR_BOOK_ID).getSheetByName('TPR');
-  if (!tpr) throw new Error('Original TPR tab was not found.');
-  const tv = tpr.getDataRange().getValues();
-  const tx = audit2Index_(tv[1]);
-  const evidence = audit2ReviewIndex_(ss.getSheetByName('Contract Evidence Review'), 'Branch ID');
-  const plans = audit2ReviewIndex_(ss.getSheetByName('Plan Classification Review'), 'Branch ID');
-  const approvals = audit2ReviewIndex_(ss.getSheetByName('Special Approval Review'), 'Branch ID');
-  const shares = audit2ReviewIndex_(ss.getSheetByName('Share Group Review'), 'Share Plan ID');
-  const branches = audit2Group_(qv.slice(1).map((v, i) => ({ values: v, row: i + 2 })), r => audit2Text_(audit2Get_(r.values, qx, 'Branch ID')));
-  const output = [];
-  let ready = 0;
-
-  Object.keys(branches).forEach(id => {
-    const rows = branches[id];
-    const oldRows = rows.map(r => audit2OriginalRow_(r.values, qx, tv)).filter(Boolean);
-    const action = audit2Action_(oldRows, rows, tx, qx);
-    const planChanged = action !== 'Maintain';
-    const missing = rows.some(r => audit2Text_(audit2Get_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
-    const contract = audit2Contract_(evidence[id] || {}, planChanged);
-    const plan = audit2Plan_(plans[id] || {}, planChanged);
-    const special = audit2Special_(plan, approvals[id] || {});
-    const share = audit2Share_(rows, qx, shares);
-    const decision = audit2Decision_(missing, contract, plan, special, share);
-    if (decision.status === 'Ready') ready++;
-    rows.forEach(r => {
-      const v = r.values.slice();
-      audit2Put_(v, qx, 'Check', decision.status === 'Ready');
-      audit2Put_(v, qx, 'Note', decision.note);
-      audit2Put_(v, qx, 'Update Action', action);
-      audit2Put_(v, qx, 'Plan Change', planChanged ? 'Yes' : 'No');
-      audit2Put_(v, qx, 'Original Plan Family', plan.oldFamily || 'Unknown');
-      audit2Put_(v, qx, 'New Plan Family', plan.newFamily || 'Unknown');
-      audit2Put_(v, qx, 'Plan Compliance', plan.result);
-      audit2Put_(v, qx, 'Required Evidence', contract.required);
-      audit2Put_(v, qx, 'Evidence Type', audit2Text_((evidence[id] || {})['Evidence Type']));
-      audit2Put_(v, qx, 'Inline Seal', audit2Text_((evidence[id] || {})['Inline Seal']));
-      audit2Put_(v, qx, 'Customer Seal', audit2Text_((evidence[id] || {})['Customer Seal']));
-      audit2Put_(v, qx, 'Contract Check', contract.result);
-      audit2Put_(v, qx, 'Special Approval Required', special.required);
-      audit2Put_(v, qx, 'Special Approval Status', special.status);
-      audit2Put_(v, qx, 'Share Group Check', share.result);
-      audit2Put_(v, qx, 'Difference', action === 'Maintain' ? '' : action + ': original TPR and Queue plan conditions differ.');
-      audit2Put_(v, qx, 'Update Status', decision.status);
-      audit2Put_(v, qx, 'Status Reason', decision.reason);
-      audit2Put_(v, qx, 'Reviewed At', new Date());
-      output.push(v);
-    });
-  });
-  queue.getRange(2, 1, output.length, qv[0].length).setValues(output);
-  queue.getRange(2, audit2Col_(qx, 'Check') + 1, output.length, 1).clearDataValidations().insertCheckboxes();
-  // Apps Script editor executions do not expose a spreadsheet UI. Keep the
-  // completion dialog for spreadsheet-menu runs without making the audit fail.
-  try {
-    SpreadsheetApp.getUi().alert('Contract audit completed. Ready branches: ' + ready + ' / ' + Object.keys(branches).length + '.');
-  } catch (ignored) {}
+  return runContractAudit();
 }
 
 function audit2EnsureQueueHeaders_(queue) {
@@ -167,6 +113,15 @@ function audit2Contract_(r, changed) {
     .some(h => audit2Text_(r[h]));
   // The evidence URL is prefilled from Queue for convenience; it is not itself a review result.
   if (!hasReview) return {result:'Need Review', required, reason:'尚未填寫合約／信件覆核結果'};
+  const reviewedAt = audit2Text_(r['Reviewed At']);
+  const nameDetailRequired = reviewedAt >= '2026-08-13';
+  const nameDetailPresent = audit2Text_(r['Document Restaurant Name']) &&
+    audit2Text_(r['Restaurant Name Match Result']) &&
+    audit2Text_(r['Reviewed Evidence File ID']) &&
+    audit2Text_(r['Reviewed Evidence Modified At']);
+  if (nameDetailRequired && !nameDetailPresent) return {result:'Need Review', required, reason:'餐廳名稱覆核追溯資料不完整：需填文件實際店名、人工比對結果、Drive 檔案 ID 與檔案更新時間'};
+  if (nameDetailPresent && ['need review','need manual confirmation','manual review','人工確認','待人工確認'].includes(audit2Text_(r['Restaurant Name Match Result']).toLowerCase())) return {result:'Need Review', required, reason:'餐廳名稱未能確認一致：文件使用店家「' + audit2Text_(r['Document Restaurant Name']) + '」；需人工確認'};
+  if (nameDetailPresent && !audit2Pass_(r['Restaurant Name Match Result'])) return {result:'Fail', required, reason:'餐廳名稱未能確認一致：文件使用店家「' + audit2Text_(r['Document Restaurant Name']) + '」'};
   if (!name || !dates || !plan) return {result:'Fail', required, reason:'合約／信件未確認餐廳名稱、合約期間與完整方案皆一致'};
   if (changed && !seals) return {result:'Need Dual Seal', required, reason:'方案有變更，需人工目視確認 inline 與客戶雙方用印'};
   if (!changed && !(seals || consent || confirmation)) return {result:'Need Review', required, reason:'原方案續約尚未確認客戶明確同意、指定達成合意信件或雙方用印'};
@@ -176,10 +131,12 @@ function audit2Plan_(r, changed) {
   const oldFamily = audit2Family_(r['Original Plan Family']), newFamily = audit2Family_(r['New Plan Family']);
   if (!oldFamily || !newFamily || !audit2Pass_(r['Complete Plan Match'])) return {oldFamily:oldFamily||'Unknown',newFamily:newFamily||'Unknown',result:'Need Check',special:'Unknown',reason:'尚未由方案參照表確認舊／新方案家族與完整組合'};
   if (oldFamily === 'Special' && newFamily === 'Special' && !changed) return {oldFamily,newFamily,result:'Pass',special:'Grandfathered',reason:''};
+  if (oldFamily === 'Special' && newFamily === 'Public') return {oldFamily,newFamily,result:'Pass',special:'StandardizedToPublic',reason:'原特殊方案已改為完整公版方案；雙方用印由合約檢核確認。'};
   if ((oldFamily === 'Public' && newFamily === 'Public') || (oldFamily === 'BD New' && newFamily === 'BD New')) return {oldFamily,newFamily,result:'Pass',special:'Not Required',reason:''};
   return {oldFamily,newFamily,result:'Pass',special:'Required',reason:''};
 }
 function audit2Special_(plan, r) {
+  if (plan.special === 'StandardizedToPublic') return {required:'No',status:'Not Required',reason:'原特殊方案改為完整公版方案，不需額外特殊申請；雙方用印由合約檢核確認'};
   if (plan.special === 'Not Required') return {required:'No',status:'Not Required',reason:''};
   if (plan.special === 'Grandfathered') return {required:'No',status:'Grandfathered',reason:''};
   if (plan.special === 'Unknown') return {required:'Unknown',status:'Unknown',reason:plan.reason};
@@ -201,7 +158,7 @@ function audit2Decision_(missing, contract, plan, special, share) {
   if (!['Pass','Not Applicable'].includes(share.result)) return {status:'Need Check',reason:share.reason,note:share.reason + '。'};
   return {status:'Ready',reason:'文件、方案與必要例外覆核皆已通過。',note:'文件、方案與必要例外覆核皆已通過。'};
 }
-function audit2Family_(v) { v = audit2Text_(v).toLowerCase(); if (v === 'public' || v === '公版') return 'Public'; if (v === 'bd new' || v === 'bd新方案' || v === 'bd') return 'BD New'; if (v === 'special' || v === '特殊') return 'Special'; return ''; }
+function audit2Family_(v) { v = audit2Text_(v).toLowerCase(); if (v === 'public' || v === '公版' || v === 'lite' || v === 'lite 方案' || v === 'email only' || v === 'email only 方案' || v === 'rsv public' || v === 'rsv public lite' || v === 'rsv public email only') return 'Public'; if (v === 'bd new' || v === 'bd新方案' || v === 'bd') return 'BD New'; if (v === 'special' || v === '特殊') return 'Special'; return ''; }
 function audit2Pass_(v) { return v === true || ['true','pass','passed','yes','approved','matched','complete'].includes(audit2Text_(v).toLowerCase()); }
 function audit2Group_(items, key) { return items.reduce((o, x) => { const k = key(x); (o[k] || (o[k] = [])).push(x); return o; }, {}); }
 function audit2Text_(v) { if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd'); return String(v === null || v === undefined ? '' : v).trim().replace(/\s+/g, ' '); }

@@ -161,7 +161,7 @@ function audit2Decision_(missing, contract, plan, special, share) {
 function audit2Family_(v) { v = audit2Text_(v).toLowerCase(); if (v === 'public' || v === '公版' || v === 'lite' || v === 'lite 方案' || v === 'email only' || v === 'email only 方案' || v === 'rsv public' || v === 'rsv public lite' || v === 'rsv public email only') return 'Public'; if (v === 'bd new' || v === 'bd新方案' || v === 'bd') return 'BD New'; if (v === 'special' || v === '特殊') return 'Special'; return ''; }
 function audit2Pass_(v) { return v === true || ['true','pass','passed','yes','approved','matched','complete'].includes(audit2Text_(v).toLowerCase()); }
 function audit2Group_(items, key) { return items.reduce((o, x) => { const k = key(x); (o[k] || (o[k] = [])).push(x); return o; }, {}); }
-function audit2Text_(v) { if (v instanceof Date && !isNaN(v.getTime())) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd'); return String(v === null || v === undefined ? '' : v).trim().replace(/\s+/g, ' '); }
+function audit2Text_(v) { if (v instanceof Date && !isNaN(v.getTime())) return dateOnlyText_(v); return String(v === null || v === undefined ? '' : v).trim().replace(/\s+/g, ' '); }
 function audit2Index_(headers) { return headers.reduce((o, h, i) => (o[String(h).trim()] = i, o), {}); }
 function audit2Col_(ix, label, prefix) { if (ix[label] !== undefined) return ix[label]; if (prefix) { const hit = Object.keys(ix).find(h => h.indexOf(label) === 0); if (hit !== undefined) return ix[hit]; } throw new Error('Missing header: ' + label); }
 function audit2Get_(row, ix, label, prefix) { return row[audit2Col_(ix, label, prefix)]; }

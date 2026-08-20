@@ -45,7 +45,7 @@
 1. 先複製原始 TPR 被勾選的產品列作為 Queue 基底，不可只生成方案欄位。
 2. 必須保留分店名稱、AM、Sales、Demand、Comment、合約連結與原始 TPR 後段欄位。
 3. 原始 TPR 的 `H:AO` 更新資訊必須一併帶到 Queue。
-4. 日期必須與 Renewal DB 完全相同，不得因時區轉換少一天。
+4. 日期必須與 Renewal DB 完全相同，不得因時區轉換少一天。Queue 以目標工作簿時區寫入不含時間成分的日期值；所有日期判斷先正規化為 `yyyy-MM-dd`，只比較年月日並忽略時、分、秒。
 5. 合約贈送組數格式至少為小數點後 2 位；超額每組單價至少為小數點後 3 位。
 
 ### 4.2 Renewal DB 新方案覆寫
@@ -263,7 +263,7 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 
 僅有 Queue 的合約連結不代表已完成檢查。若覆核表只有連結、沒有覆核結果，應顯示為待覆核。
 
-自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會直接與 Queue／Renewal DB 日期比對，不再只依賴人工填寫的 `Contract Period Match`。
+自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會將文件、Queue 與 Renewal DB 日期正規化為 `yyyy-MM-dd` 後只比較年月日，不再只依賴人工填寫的 `Contract Period Match`，也不以時、分、秒差異判定不一致。
 
 若 Queue 有 `Deposit-Commission` 產品列，`Contract Evidence Review` 必須另外填寫文件中實際出現的：
 

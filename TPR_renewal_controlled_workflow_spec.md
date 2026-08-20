@@ -75,6 +75,8 @@ TPR `TPR` 與 Renewal DB `{YYYYMM}` 的 header row 目前均為第 2 列，資�
 | `overage_type`、`overage_unit_price` | 超額計算方式、超額每組單價 | 新方案區塊的同名欄位 | 取第 2 個同名欄位 |
 | `tax_id` | — | `Tax reg number` | Share 統編唯一來源 |
 
+所有日期欄位在 Queue 以目標工作簿時區的純日期值儲存並顯示為 `yyyy-MM-dd`。跨 TPR、Renewal DB、Queue 與文件比較時，先正規化為 `yyyy-MM-dd`，只比較年月日；不得讓時、分、秒或 UTC offset 影響結果。
+
 Renewal DB 文件中曾以欄位字母描述資料位置，僅能作為目前觀察紀錄，**不可成為實作定位方式**。同名欄位（如 `Share ID`、`Overage type`、`Deposit`、`Voice`）必須同時滿足目標標題、`新合約方案` group 與第二次 occurrence。
 
 正規化時，方案表未列出的 RSV 贈送組數視為 `0`；但 `unlimited`、`-`、`未列`、`可使用`、`不可使用` 是不同語意，除明確規則外不得互換。

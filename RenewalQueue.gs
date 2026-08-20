@@ -98,6 +98,7 @@ function installTestWorkbookMenu() {
 
 function buildQueue() {
   const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+  const queueTimeZone = ss.getSpreadsheetTimeZone();
   const controlSheet = ss.getSheetByName('Control');
   ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
   const control = readSettings_(controlSheet);
@@ -193,7 +194,7 @@ function buildQueue() {
       output.push([...base, batchId, 'TPR!' + source.row, '', 'Need Renewal Data — manual review required']);
       return;
     }
-    const data = transformRow_(base, queueIndex, renewalRow.values, renewalSet.indexes, planRules, renewalSet.timeZone);
+    const data = transformRow_(base, queueIndex, renewalRow.values, renewalSet.indexes, planRules, renewalSet.timeZone, queueTimeZone);
     setExact_(data, queueIndex, 'Check', false);
     output.push([...data, batchId, 'TPR!' + source.row, renewalMonth + '!' + renewalRow.row, data._status || 'Converted — review required']);
   });
@@ -234,7 +235,7 @@ function syncPlanCatalog() {
     '; pending changes: ' + result.pendingChanges.length + '.');
 }
 
-function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone) {
+function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone, queueTimeZone) {
   const value = key => {
     const column = mapping[key];
     return column === undefined ? '' : renewal[column];
@@ -246,8 +247,8 @@ function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone) {
   const plan = resolvePlan_(String(value('new_period') || ''), planRules);
   const period = plan.period || String(value('new_period') || '');
   setByPrefix_(row, ix, '付款起始日', '');
-  setByPrefix_(row, ix, '合約起始日', dateOnlyForQueue_(value('new_start'), renewalTimeZone));
-  setByPrefix_(row, ix, '合約結束日', dateOnlyForQueue_(value('new_end'), renewalTimeZone));
+  setByPrefix_(row, ix, '合約起始日', dateOnlyForQueue_(value('new_start'), renewalTimeZone, queueTimeZone));
+  setByPrefix_(row, ix, '合約結束日', dateOnlyForQueue_(value('new_end'), renewalTimeZone, queueTimeZone));
   setByPrefix_(row, ix, '解約日', '');
   setByPrefix_(row, ix, 'Long-Term Contract Notes', value('long_term'));
   setByPrefix_(row, ix, 'TMS Plan Type', value('tms_plan_type'));
@@ -305,10 +306,14 @@ function writeQueue_(sheet, headers, rows, ix) {
   if (rows.length) sheet.getRange(2, 1, rows.length, headers.length)
     .setValues(rows.map(r => r.slice(0, headers.length).concat(Array(Math.max(0, headers.length - r.length)).fill(''))));
   const check = requiredHeader_(ix, 'Check', 'Queue') + 1;
+  const contractStart = requiredHeader_(ix, '合約起始日', 'Queue', true) + 1;
+  const contractEnd = requiredHeader_(ix, '合約結束日', 'Queue', true) + 1;
   const bonus = requiredHeader_(ix, '合約贈送組數', 'Queue', true) + 1;
   const overage = requiredHeader_(ix, '超額每組單價', 'Queue', true) + 1;
   if (rows.length) {
     sheet.getRange(2, check, rows.length, 1).clearDataValidations().insertCheckboxes();
+    sheet.getRange(2, contractStart, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+    sheet.getRange(2, contractEnd, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sheet.getRange(2, bonus, rows.length, 1).setNumberFormat('0.00');
     sheet.getRange(2, overage, rows.length, 1).setNumberFormat('0.000');
   }
@@ -345,12 +350,13 @@ function zeroNumberAsBlank_(v) {
   const value = numberOrBlank_(v);
   return value === 0 ? '' : value;
 }
-function dateOnlyForQueue_(value, sourceTimeZone) {
+function dateOnlyForQueue_(value, sourceTimeZone, destinationTimeZone) {
   if (!(value instanceof Date) || isNaN(value.getTime())) return value;
-  const parts = Utilities.formatDate(value, sourceTimeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd')
-    .split('-').map(Number);
-  // Use a UTC date-only value so writing between spreadsheets cannot subtract the source time-zone offset.
-  return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  const dateText = Utilities.formatDate(value, sourceTimeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  // A Sheets date is local midnight in the destination spreadsheet. Parsing
+  // the source Y-M-D in that time zone keeps the stored value date-only and
+  // avoids the hidden 08:00 produced by writing UTC midnight to Asia/Taipei.
+  return Utilities.parseDate(dateText, destinationTimeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 function periodMonths_(period) {
   const p = String(period).toLowerCase();
@@ -1176,18 +1182,20 @@ function proratedValueMatches_(oldValue, annualValue, factor) {
   return Math.abs(oldNumber - Math.round(annualNumber / 12 * factor)) <= 0.000001;
 }
 function dateFromCell_(value) {
-  if (value instanceof Date && !isNaN(value.getTime())) return new Date(Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()));
-  const m = auditText_(value).match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  const dateText = dateOnlyText_(value);
+  const m = dateText.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   return m ? new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : null;
 }
+function dateOnlyText_(value, timeZone) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, timeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  const match = auditText_(value).match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:\s+.*)?$/);
+  if (!match) return '';
+  return match[1] + '-' + ('0' + Number(match[2])).slice(-2) + '-' + ('0' + Number(match[3])).slice(-2);
+}
 function auditDateText_(value) {
-  // Sheet date cells are Date objects representing local midnight in the
-  // spreadsheet time zone.  Normalize their local Y/M/D through
-  // dateFromCell_ before formatting in UTC, otherwise Taiwan dates are
-  // displayed and compared as the previous day.
-  const date = dateFromCell_(value);
-  if (!date || isNaN(date.getTime())) return '';
-  return Utilities.formatDate(date, 'UTC', 'yyyy-MM-dd');
+  return dateOnlyText_(value);
 }
 function isFullYearTerm_(start, end) {
   const expectedEnd = new Date(Date.UTC(start.getUTCFullYear() + 1, start.getUTCMonth(), start.getUTCDate() - 1));

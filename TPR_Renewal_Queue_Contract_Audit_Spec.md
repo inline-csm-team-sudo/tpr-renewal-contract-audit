@@ -4,7 +4,7 @@
 
 本流程將 TPR 中標示需續約檢查的分店，依 Renewal DB 的「新方案」轉成正式 TPR 格式的 Queue，並以合約／信件、方案規則、特殊申請及 Share Plan 條件進行稽核。
 
-流程只可寫入測試工作表的 Queue、覆核表與方案管理表；**不得寫回原始 TPR、Renewal DB 或方案數值**。經使用者授權的唯一來源例外，是在官方 RSV／RwG 方案表新增及維護永久 `Plan Code` 欄。
+流程只可寫入測試工作表的 Queue、覆核表與方案管理表；**Build Queue／Run Contract Audit 不得寫回原始 TPR、Renewal DB 或任何方案參照表**。官方 RSV／RwG 方案表的永久 `Plan Code` 只能在使用者另行授權並明確執行 `maintainPlanCodes()` 時補入空白 cell。
 
 最終輸出為 Queue 前方的：
 
@@ -197,7 +197,7 @@ Share Plan 的整份合約總額必須用合約附件所列的完整成員合計
 
 方案世代只讀測試工作簿 `Legacy Branch Master` 的 Branch ID membership，正常流程不得掃描 `Raw : TPR`。`first contract date` 若存在只供追溯，不參與 runtime 分類；日期空白／無效不阻擋，但 Duplicate Branch ID 必須阻擋受影響 Branch 並在 Note 列出 rows。舊方案只匹配 Public 時不論 membership 均屬 Public；只匹配 BD New 時須同時不在 Legacy 才屬 BD New，若已列入 Legacy則為 conflict；同時匹配 Public／BD New 時，列在 Legacy 選 Public，不在 Legacy 選 BD New。新方案重複匹配時維持舊方案家族，Public ↔ BD New 不得自動轉換。Special 完全不變可依既有方案延續；Special 改為標準方案時，列在 Legacy 的目標為 Public，不在 Legacy 的目標為 BD New。合約日期另行檢核，不列入方案身分比較。
 
-`Legacy Branch Master` 是 Legacy cohort membership 的唯一主檔；`Canonical Plan Catalog` 以永久 Plan Code 及版本保存方案。既有方案異動沿用代碼並留下版本，新方案才建立新代碼。同步時一併把 RSV／RwG 的 `Plan Reference Mapping` 改為官方 `TMS 方案` 的逐列完整方案版型，並保留 Deposit Mapping。官方方案修改／刪除若尚未在 `Plan Catalog Change Review` 核准，受影響 Branch 不得通過；核准刪除後保留歷史並標為 Inactive。
+`Legacy Branch Master` 是 Legacy cohort membership 的唯一主檔；`Canonical Plan Catalog` 以永久 Plan Code 及版本保存方案。Build／Audit 每次唯讀最新 `TMS 方案` 做 Catalog diff；supported row 缺 Plan Code 時 fail closed。新方案只由另行授權的 `maintainPlanCodes()` 對空白 cell 配發永久代碼，完成後重新同步才建立 Catalog v1 Active。既有方案異動沿用代碼並留下版本。同步時一併把 RSV／RwG 的 `Plan Reference Mapping` 改為官方 `TMS 方案` 的逐列完整方案版型，並保留 Deposit Mapping。官方方案修改／刪除若尚未在 `Plan Catalog Change Review` 核准，受影響 Branch 不得通過；核准刪除後保留歷史並標為 Inactive。
 
 判斷規則：
 

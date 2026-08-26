@@ -22,7 +22,9 @@ without exposing Queue plan values to the reader; compare with Queue only after 
 ## Source of truth and scope
 
 - Read the current source IDs, tab names, writable destinations, and rule settings from the reference and the workbook `Control` sheet.
-- Treat original TPR, Renewal DB, plan-reference sheets, contracts, and emails as read-only.
+- Treat original TPR, Renewal DB, plan-reference sheets, contracts, and emails as read-only during
+  Build Queue and Audit. Maintain official RSV／RwG `Plan Code` values only through the explicit
+  `maintainPlanCodes()` maintenance action after separate user authorization.
 - Write only to the test workbook Queue, review sheets, and Audit Log unless the user separately and explicitly authorizes a formal TPR writeback.
 - Do not use `合約後補更新 Tool.xlsx` for this workflow.
 - Resolve spreadsheet fields by normalized header title and mapping key, never by fixed column letter.

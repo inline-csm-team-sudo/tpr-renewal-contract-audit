@@ -38,7 +38,8 @@
 ### 1.2 寫入邊界
 
 - 可寫：`TPR Update Queue`、`Contract Evidence Review`、`Plan Classification Review`、`Special Approval Review`、`Share Group Review`、`Audit Log` 及明確的設定表。
-- 不可自行寫入：正式 TPR、Renewal DB、方案參照數值。唯一例外是經使用者授權後，程式可在 RSV／RwG 官方方案表新增並維護永久 `Plan Code` 欄；不得藉此修改任何方案內容。
+- `Build Queue` 與 `Run Contract Audit` 對正式 TPR、Renewal DB 及所有方案參照表一律唯讀；每次仍須讀取最新 `TMS 方案` 以偵測 Catalog 的新增、修改與刪除。
+- 官方 RSV／RwG 方案表唯一可寫欄位是經使用者另行授權後，由明確的 `maintainPlanCodes()` maintenance action 補入空白的永久 `Plan Code` cell。Maintenance 不得重寫既有代碼或方案數值；一般 Build／Audit path 不具來源寫入權。
 - `Check=TRUE` 只代表測試 Queue 通過，不代表已獲授權寫回正式 TPR。
 
 ## 2. 完整處理流程
@@ -260,6 +261,8 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - 人工案件先寫 `Check=FALSE` 與具體 Note；使用者可直接在 Queue 勾選，但下次重跑會重新計算並覆蓋。不要建立永久人工世代 Override。
 - `Plan Classification Review!Complete Plan Match` 明確填入 `FALSE`／`Fail` 時是人工 veto，Branch 不得 Ready；空白或 TRUE 仍繼續自動 Catalog 判斷，TRUE 不得覆蓋自動 conflict。
 - `Canonical Plan Catalog` 以永久 `Plan Code` 及版本保存已確認方案；既有方案異動沿用原代碼並新增版本，新方案才建立新代碼。
+- `Build Queue`／`Run Contract Audit` 每次從正式 `TMS 方案` 唯讀取得最新來源並執行 Catalog diff。所有 supported plan rows 的 Plan Code 必須完整且唯一；空白時整次流程 fail closed，錯誤列出 source row 與方案事實，不得在 Audit 中臨時配碼或回寫來源。
+- 新方案配碼是獨立 maintenance：只有明確執行 `maintainPlanCodes()` 時才重新檢查最新 source snapshot、duplicate 與最大 `TMS-XXXX`，並只寫空白 Plan Code cells。無效方案不配碼，既有非空代碼不得改寫；寫後必須 read-back 驗證唯一性。完成後重新執行 sync／Build／Audit，新的永久代碼方案才可建立 Catalog v1 Active。
 - RSV／RwG 的 `Plan Reference Mapping` 必須由同步流程依官方 `TMS 方案` 的 row-package 欄位重建；不得再保留舊公版／BD 分頁的 column-package Mapping。Deposit Mapping 原封保留。
 - 官方方案表的既有方案修改或刪除，必須進入 `Plan Catalog Change Review`。尚未核准時沿用上一個已確認版本，受影響 Branch 不得通過；其他 Branch 不受影響。刪除核准後標為 `Inactive`，不得刪除歷史版本。
 
@@ -359,7 +362,7 @@ Structured extraction 指令變更時，另以同一批 15 份文件做 Before�
 | --- | --- |
 | Renewal DB 插入、改名或新增欄位 | `Field Mapping` |
 | 新公版、BD、Deposit 方案 | 方案參照及 Plan Reference Mapping |
-| RSV／RwG 既有方案修改、刪除或新增 | 官方方案表 `Plan Code`、`Canonical Plan Catalog`、`Plan Catalog Change Review`；既有修改／刪除須核准 |
+| RSV／RwG 既有方案修改、刪除或新增 | Build／Audit 唯讀偵測最新來源並同步 `Canonical Plan Catalog`、`Plan Catalog Change Review`；新列空白代碼須另行授權執行 `maintainPlanCodes()`，既有修改／刪除仍須核准 |
 | Legacy cohort 分頁／Branch ID 欄名 | `Control` 的 `Legacy Branch Master Tab`、`Legacy Branch ID Header`；首約日期只供選填追溯 |
 | 新產品或展開方式 | Product Expansion Rules |
 | 贈送比例等門檻 | `Control` |

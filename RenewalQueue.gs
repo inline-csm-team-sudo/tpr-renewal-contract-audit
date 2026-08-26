@@ -82,6 +82,7 @@ function onOpen() {
     .createMenu('Renewal Queue')
     .addItem('Build Queue', 'buildQueue')
     .addItem('Sync Plan Catalog', 'syncPlanCatalog')
+    .addItem('Maintain Plan Codes', 'maintainPlanCodes')
     .addItem('Run Contract Audit', 'runContractAudit')
     .addItem('Validate configuration', 'validateConfiguration')
     .addToUi();
@@ -235,6 +236,30 @@ function syncPlanCatalog() {
   const result = syncPlanCatalog_(ss, readSettings_(controlSheet));
   notify_('Plan catalog synced. Active plans: ' + result.activePlans.length +
     '; pending changes: ' + result.pendingChanges.length + '.');
+}
+
+function maintainPlanCodes() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+    const control = readSettings_(ss.getSheetByName('Control'));
+    const sourceSpreadsheetId = auditText_(control['RSV Plan Reference Spreadsheet ID']);
+    const sourceTab = auditText_(control['RSV Plan Reference Tab']);
+    const codeHeader = auditText_(control['RSV Plan Code Header']) || 'Plan Code';
+    if (!sourceSpreadsheetId || !sourceTab) {
+      throw new Error('RSV plan-reference source is not configured.');
+    }
+    const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
+    if (!sourceSheet) throw new Error('RSV plan-reference tab was not found: ' + sourceTab);
+    const result = assignMissingPlanCodes_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
+    notify_('Plan Code maintenance completed. Assigned codes: ' +
+      (result.assignments.length
+        ? result.assignments.map(item => sourceTab + '!' + item.rowNumber + '=' + item.planCode).join(', ')
+        : 'none') + '. Run Sync Plan Catalog or the Audit again to refresh the test Catalog.');
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone, queueTimeZone) {
@@ -588,7 +613,7 @@ function syncPlanCatalog_(ss, control) {
 
   const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
   if (!sourceSheet) throw new Error('RSV plan-reference tab was not found: ' + sourceTab);
-  const sourcePlans = readAndAssignPlanCodes_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
+  const sourcePlans = readPlanCatalogSource_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
   const catalogSheet = ensureReviewSheet_(ss, 'Canonical Plan Catalog', CANONICAL_PLAN_HEADERS);
   const changeSheet = ensureReviewSheet_(ss, 'Plan Catalog Change Review', PLAN_CHANGE_HEADERS);
   const existingCatalog = readTable_(catalogSheet);
@@ -702,13 +727,77 @@ function syncPlanCatalog_(ss, control) {
   return { activePlans: active, pendingChanges: pending };
 }
 
-function readAndAssignPlanCodes_(sheet, spreadsheetId, sourceSheet, codeHeader) {
-  let lastColumn = sheet.getLastColumn();
+function readPlanCatalogSource_(sheet, spreadsheetId, sourceSheet, codeHeader) {
+  const snapshot = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  const analysis = analyzePlanSourceSnapshot_(snapshot, spreadsheetId);
+  assertValidPlanSourceAnalysis_(analysis);
+  if (analysis.missingPlanCodes.length) {
+    throw new Error('TMS plan source contains supported rows without Plan Code: ' +
+      analysis.missingPlanCodes.map(item => item.description).join('；') +
+      '。請先明確執行 maintainPlanCodes()。');
+  }
+  if (!analysis.plans.length) throw new Error('TMS plan source contains no supported Public／BD New RSV／RwG plans.');
+  return analysis.plans;
+}
+
+function assignMissingPlanCodes_(sheet, spreadsheetId, sourceSheet, codeHeader) {
+  const initial = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  const initialAnalysis = analyzePlanSourceSnapshot_(initial, spreadsheetId);
+  assertValidPlanSourceAnalysis_(initialAnalysis);
+  if (!initialAnalysis.missingPlanCodes.length) return { assignments:[] };
+
+  const latest = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  if (planSourceSnapshotSignature_(latest) !== planSourceSnapshotSignature_(initial)) {
+    throw new Error('TMS plan source changed during Plan Code maintenance preflight; zero writes performed.');
+  }
+  const latestAnalysis = analyzePlanSourceSnapshot_(latest, spreadsheetId);
+  assertValidPlanSourceAnalysis_(latestAnalysis);
+  const usedCodes = latest.values.map(row => auditText_(row[latest.codeColumn])).filter(Boolean);
+  let next = usedCodes.reduce((max, code) => {
+    const match = code.match(/^TMS-(\d+)$/i);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0) + 1;
+  const assignments = latestAnalysis.missingPlanCodes.map(item => ({
+    rowNumber:item.rowNumber,
+    planCode:'TMS-' + ('0000' + next++).slice(-4)
+  }));
+
+  assignments.forEach(item => {
+    sheet.getRange(item.rowNumber, latest.codeColumn + 1).setValue(item.planCode);
+  });
+
+  const verified = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  const verifiedAnalysis = analyzePlanSourceSnapshot_(verified, spreadsheetId);
+  assertValidPlanSourceAnalysis_(verifiedAnalysis);
+  if (verifiedAnalysis.missingPlanCodes.length) {
+    throw new Error('Plan Code maintenance read-back failed; supported rows remain blank: ' +
+      verifiedAnalysis.missingPlanCodes.map(item => item.description).join('；'));
+  }
+  latest.values.forEach((row, index) => {
+    const priorCode = auditText_(row[latest.codeColumn]);
+    if (!priorCode) return;
+    const actualCode = auditText_(verified.values[index][verified.codeColumn]);
+    if (actualCode !== priorCode) {
+      throw new Error(sourceSheet + '!' + (index + 2) + ' existing Plan Code changed during maintenance: ' +
+        priorCode + ' → ' + actualCode);
+    }
+  });
+  assignments.forEach(item => {
+    const actualCode = auditText_(verified.values[item.rowNumber - 2][verified.codeColumn]);
+    if (actualCode !== item.planCode) {
+      throw new Error(sourceSheet + '!' + item.rowNumber + ' Plan Code read-back mismatch: expected ' +
+        item.planCode + ', actual ' + (actualCode || 'blank'));
+    }
+  });
+  return { assignments };
+}
+
+function planSourceSnapshot_(sheet, sourceSheet, codeHeader) {
+  const lastColumn = sheet.getLastColumn();
   if (lastColumn < 1) throw new Error('TMS plan source has no header row.');
-  let headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(String);
-  let codeColumn = headers.findIndex(h => norm_(h) === norm_(codeHeader));
-  const codeHeaderMissing = codeColumn < 0;
-  if (codeHeaderMissing) codeColumn = lastColumn;
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(String);
+  const codeColumn = headers.findIndex(header => norm_(header) === norm_(codeHeader));
+  if (codeColumn < 0) throw new Error('TMS plan source is missing required Plan Code header: ' + codeHeader);
   const ix = headerIndex_(headers);
   const columns = {
     catalog: requiredHeader_(ix, 'Source Tab', 'TMS plan source'),
@@ -721,17 +810,20 @@ function readAndAssignPlanCodes_(sheet, spreadsheetId, sourceSheet, codeHeader) 
   };
   const rowCount = Math.max(0, sheet.getLastRow() - 1);
   if (!rowCount) throw new Error('TMS plan source has no data rows.');
-  const values = sheet.getRange(2, 1, rowCount, lastColumn).getValues();
-  const usedCodes = values.map(r => auditText_(r[codeColumn])).filter(Boolean);
-  const duplicates = usedCodes.filter((code, i) => usedCodes.indexOf(code) !== i);
-  if (duplicates.length) throw new Error('Duplicate Plan Code in TMS plan source: ' + [...new Set(duplicates)].join(', '));
-  let next = usedCodes.reduce((max, code) => {
-    const match = code.match(/^TMS-(\d+)$/i);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0) + 1;
+  return {
+    sourceSheet, headers, codeColumn, columns,
+    values:sheet.getRange(2, 1, rowCount, lastColumn).getValues()
+  };
+}
+
+function analyzePlanSourceSnapshot_(snapshot, spreadsheetId) {
+  const usedCodes = snapshot.values.map(row => auditText_(row[snapshot.codeColumn])).filter(Boolean);
+  const duplicates = usedCodes.filter((code, index) => usedCodes.indexOf(code) !== index);
   const plans = [];
   const invalidRows = [];
-  values.forEach((row, i) => {
+  const missingPlanCodes = [];
+  snapshot.values.forEach((row, index) => {
+    const columns = snapshot.columns;
     const sourceCatalog = auditText_(row[columns.catalog]);
     const family = sourceCatalog === 'BD 新方案' ? 'BD New' :
       ['公版方案', 'Lite 方案', 'Email Only 方案'].includes(sourceCatalog) ? 'Public' : '';
@@ -747,32 +839,52 @@ function readAndAssignPlanCodes_(sheet, spreadsheetId, sourceSheet, codeHeader) 
     if (sets === null) problems.push('使用組數空白或無法判讀');
     if (price === null) problems.push('月費 / 年費空白或無法判讀');
     if (problems.length) {
-      invalidRows.push(sourceSheet + '!' + (i + 2) + '：' + problems.join('、'));
+      invalidRows.push(sourcePlanFactDescription_(snapshot.sourceSheet, index + 2, row, columns) +
+        '：' + problems.join('、'));
       return;
     }
-    let planCode = auditText_(row[codeColumn]);
+    const planCode = auditText_(row[snapshot.codeColumn]);
     if (!planCode) {
-      planCode = 'TMS-' + ('0000' + next).slice(-4);
-      next++;
-      row[codeColumn] = planCode;
+      missingPlanCodes.push({
+        rowNumber:index + 2,
+        description:sourcePlanFactDescription_(snapshot.sourceSheet, index + 2, row, columns)
+      });
+      return;
     }
     plans.push({
       planCode, family, sourceCatalog, billing, product, sets,
       bonus: auditNumber_(row[columns.bonus]) === null ? 0 : auditNumber_(row[columns.bonus]),
       price, overage: auditNumber_(row[columns.overage]),
-      sourceSpreadsheetId: spreadsheetId, sourceSheet, sourceRow: i + 2
+      sourceSpreadsheetId: spreadsheetId, sourceSheet:snapshot.sourceSheet, sourceRow:index + 2
     });
   });
-  if (invalidRows.length) {
-    throw new Error('TMS plan source contains invalid official Catalog rows: ' + invalidRows.join('；'));
+  return { plans, invalidRows, missingPlanCodes, duplicates:[...new Set(duplicates)] };
+}
+
+function assertValidPlanSourceAnalysis_(analysis) {
+  if (analysis.duplicates.length) {
+    throw new Error('Duplicate Plan Code in TMS plan source: ' + analysis.duplicates.join(', '));
   }
-  if (!plans.length) throw new Error('TMS plan source contains no supported Public／BD New RSV／RwG plans.');
-  if (codeHeaderMissing) {
-    sheet.getRange(1, lastColumn).copyTo(sheet.getRange(1, codeColumn + 1), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
-    sheet.getRange(1, codeColumn + 1).setValue(codeHeader);
+  if (analysis.invalidRows.length) {
+    throw new Error('TMS plan source contains invalid official Catalog rows: ' +
+      analysis.invalidRows.join('；'));
   }
-  sheet.getRange(2, codeColumn + 1, rowCount, 1).setValues(values.map(r => [r[codeColumn]]));
-  return plans;
+}
+
+function planSourceSnapshotSignature_(snapshot) {
+  return JSON.stringify({ headers:snapshot.headers, values:snapshot.values });
+}
+
+function sourcePlanFactDescription_(sourceSheet, rowNumber, row, columns) {
+  return sourceSheet + '!' + rowNumber + '（' + [
+    'Source Tab=' + (auditText_(row[columns.catalog]) || '空白'),
+    '繳款週期=' + (auditText_(row[columns.billing]) || '空白'),
+    '產品=' + (auditText_(row[columns.product]) || '空白'),
+    '使用組數=' + (auditText_(row[columns.sets]) || '空白'),
+    '贈送組數=' + (auditText_(row[columns.bonus]) || '空白'),
+    '月費 / 年費=' + (auditText_(row[columns.price]) || '空白'),
+    '每組超額單價=' + (auditText_(row[columns.overage]) || '空白')
+  ].join('、') + '）';
 }
 
 function canonicalPlanRowObject_(plan, version, status, effectiveFrom, effectiveTo, importedAt) {

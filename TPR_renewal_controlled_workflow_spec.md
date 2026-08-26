@@ -1,13 +1,13 @@
 # TPR 續約受控更新與合約稽核規格
 
-> 狀態：受控實作基準（只允許測試工作簿與明確授權的 Plan Code 欄寫入）
+> 狀態：受控實作基準（Build／Audit 只寫測試工作簿；Plan Code 維護須另行明確授權）
 > 本文件整合「TPR 續約測試工作區規格書」與「TPR 續約更新與合約稽核規格」。兩者有範圍差異時，以本文件的階段邊界為準。
 
 ## 1. 目的、範圍與不可違反原則
 
 本規格定義從舊 TPR、Renewal DB、文件證據與方案參照表產生 `TPR Update Queue` 的未來受控流程。目標是建立可追溯、可審核、以 Branch ID 為原子單位的續約更新機制。
 
-本階段允許經使用者要求修改 Google Apps Script，並寫入測試工作簿的 Queue、覆核表與方案管理表。不得寫入正式 TPR、Renewal DB 或方案數值；官方 RSV／RwG 方案表唯一可寫欄位為經授權的永久 `Plan Code`。
+本階段允許經使用者要求修改 Google Apps Script，並寫入測試工作簿的 Queue、覆核表與方案管理表。Build Queue／Run Contract Audit 對正式 TPR、Renewal DB 與方案參照表一律唯讀；官方 RSV／RwG 方案表的永久 `Plan Code` 只能由另行授權的 explicit maintenance action 補入空白 cell。
 
 後續實作必須遵守：
 
@@ -32,7 +32,7 @@
 | G 欄文件／信件 | 原始 TPR 的文件連結 | 客戶同意、用印與實際方案事實 | 唯讀；掃描件須逐頁目視覆核 |
 | 特殊申請核准紀錄 | 待指定 | 例外方案的授權證據 | 未指定即 `Unknown` |
 
-來源資料原則上必須經 Google Sheets API 或等效唯讀介面擷取。不得寫入正式 TPR、Renewal DB 或方案數值；經使用者授權後，唯一例外是官方 RSV／RwG 方案表的永久 `Plan Code` 欄。已知測試基準為 `TEST-202607-001`（31 Branch ID／34 個 TPR 產品列）及 `TEST-202608-001`（3 Branch ID／5 個 TPR 產品列）；每一個月份必須是獨立 Batch，不得合併。
+來源資料原則上必須經 Google Sheets API 或等效唯讀介面擷取。Build／Audit 不得寫入正式 TPR、Renewal DB 或方案參照表；每次仍唯讀最新 `TMS 方案` 做 Catalog diff。supported plan row 缺永久代碼時 fail closed，經使用者授權後另行執行 `maintainPlanCodes()`，只補空白 Plan Code cell。已知測試基準為 `TEST-202607-001`（31 Branch ID／34 個 TPR 產品列）及 `TEST-202608-001`（3 Branch ID／5 個 TPR 產品列）；每一個月份必須是獨立 Batch，不得合併。
 
 ## 3. 未來測試工作簿與批次模型
 

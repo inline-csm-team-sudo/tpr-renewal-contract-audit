@@ -70,7 +70,7 @@
 | --- | --- |
 | `RSV`、`RwG` | 新主產品、組數、贈送組數、價格、Share Plan、超額計算與單價均由 Renewal DB 新方案帶入 |
 | `Deposit` | 帶入付款週期、訂金費用、B2B/B2C 類型、設定費；B2B 的佣金組數依指定欄位處理 |
-| `Deposit-Commission` | 帶入 Credit Card／Virtual ATM 等佣金比例；不填不適用的主產品價格與 Share Plan。合約／信件中的抽成或買入價格必須另行與此比例比對 |
+| `Deposit-Commission` | 僅用於 B2C，帶入 Credit Card／Virtual ATM 等佣金比例；不填不適用的主產品價格與 Share Plan。合約／信件中的抽成或買入價格必須另行與此比例比對。B2B 交易服務費仍留在 `Deposit` 指定欄位，不建立此產品列 |
 | `Voice`、`Survey`、`eCoupon` | 帶入付款週期；金額依付款週期換算後填入合約價格 |
 
 ### 4.3 找不到 Renewal DB 資料
@@ -279,7 +279,7 @@ Document Match writer 只能依實際 `targetRowNumber` 寫入。真正寫入前
 
 Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
 
-每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。`Deposit-Commission` 是逐筆交易費率產品，`billing_period` 固定為 `NotApplicable` 且不參與 Document Comparison；不得由 Queue、主產品或年繳總額猜成 monthly／annual。其 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數仍須精確一致。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
+每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；其 `billing_period` 固定為 `NotApplicable` 且不參與 Document Comparison，不得由 Queue、主產品或年繳總額猜成 monthly／annual。其 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數仍須精確一致。B2B 的交易服務費文字依既有 B2B／Deposit 欄位語意處理，不建立 `Deposit-Commission`。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
 
 自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會將文件、Queue 與 Renewal DB 日期正規化為 `yyyy-MM-dd` 後只比較年月日，不再只依賴人工填寫的 `Contract Period Match`，也不以時、分、秒差異判定不一致。
 

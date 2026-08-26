@@ -7,7 +7,7 @@ globalThis.__test = {
   headerIndex_, structuredDocumentMatchAudit_, structuredReviewForProtectedGates_,
   contractAudit_, decideAuditStatus_, headerNameMigrationPlan_, missingEvidenceReviewRows_,
   ensureReviewSheetHeadersByName_, writeDocumentMatchTraces_, isExplicitStructuredPlanVeto_,
-  indexedEvidenceReviews_,
+  indexedEvidenceReviews_, normalizeStructuredDocumentProducts_,
   evidenceReviewHeaders:EVIDENCE_REVIEW_HEADERS
 };`;
 const context = {
@@ -308,6 +308,116 @@ function travelCommission(overrides = {}) {
     buy_in_price:field('Confirmed', 95)
   }, overrides));
 }
+
+// Deposit clause extraction regression 1: a Credit Card buy-in clause creates
+// Deposit-Commission even when the document never uses that product name.
+// The structured fact preserves buy-in 95; Apps Script derives commission 5.
+const creditCardBuyIn95 = travelCommission({
+  commission_rate:field('NotMentioned'),
+  buy_in_price:field('Confirmed', 95)
+});
+let normalizedClauseProducts = api.normalizeStructuredDocumentProducts_(
+  structuredData([creditCardBuyIn95])
+);
+assert.strictEqual(normalizedClauseProducts.errors.length, 0);
+assert.strictEqual(normalizedClauseProducts.lines.length, 1);
+assert.strictEqual(normalizedClauseProducts.lines[0].product, 'Deposit-Commission');
+assert.strictEqual(normalizedClauseProducts.lines[0].overageMethod, 'credit card');
+assert.strictEqual(normalizedClauseProducts.lines[0].bonus, '5');
+assert.strictEqual(creditCardBuyIn95.buy_in_price.value, 95);
+assert.strictEqual(creditCardBuyIn95.commission_rate.state, 'NotMentioned');
+const creditCardCommission5Queue = [
+  queueRow({ product:'Deposit-Commission', billing:'annual', sets:'', bonus:5, price:'',
+    share:'', overageMethod:'Credit Card', overagePrice:'' })
+];
+assert.strictEqual(match(structuredData([creditCardBuyIn95]), creditCardCommission5Queue).result, 'MATCH');
+
+// Deposit clause extraction regression 2: one canonical row per payment
+// method/rate; Credit Card and Virtual ATM buy-ins must not be merged.
+const creditCardBuyIn955 = travelCommission({
+  commission_rate:field('NotMentioned'),
+  buy_in_price:field('Confirmed', 95.5)
+});
+const virtualAtmBuyIn985 = travelCommission({
+  deposit_type:field('Confirmed', 'Virtual ATM'),
+  commission_rate:field('NotMentioned'),
+  buy_in_price:field('Confirmed', 98.5)
+});
+normalizedClauseProducts = api.normalizeStructuredDocumentProducts_(
+  structuredData([creditCardBuyIn955, virtualAtmBuyIn985])
+);
+assert.strictEqual(normalizedClauseProducts.errors.length, 0);
+assert.strictEqual(normalizedClauseProducts.lines.length, 2);
+assert.strictEqual(
+  JSON.stringify(normalizedClauseProducts.lines.map(line => [line.overageMethod, line.bonus])),
+  JSON.stringify([['credit card', '4.5'], ['virtual atm', '1.5']])
+);
+const multiMethodCommissionQueue = [
+  queueRow({ product:'Deposit-Commission', billing:'annual', sets:'', bonus:4.5, price:'',
+    share:'', overageMethod:'Credit Card', overagePrice:'' }),
+  queueRow({ product:'Deposit-Commission', billing:'annual', sets:'', bonus:1.5, price:'',
+    share:'', overageMethod:'Virtual ATM', overagePrice:'' })
+];
+assert.strictEqual(
+  match(structuredData([creditCardBuyIn955, virtualAtmBuyIn985]), multiMethodCommissionQueue).result,
+  'MATCH'
+);
+
+// Deposit clause extraction regression 3: a B2B transaction-service rate is
+// a field on the B2B Deposit row. It must never create Deposit-Commission.
+const b2bDepositServiceFee5 = product({
+  product:field('Confirmed', 'Deposit'),
+  billing_period:field('Confirmed', 'annual'),
+  usage_sets:field('NotApplicable'),
+  bonus_sets:field('NotApplicable'),
+  price:field('Confirmed', 0),
+  share_plan_id:field('NotApplicable'),
+  deposit_type:field('Confirmed', 'B2B'),
+  setup_fee:field('Confirmed', 0),
+  commission_rate:field('Confirmed', 5),
+  buy_in_price:field('NotMentioned')
+});
+normalizedClauseProducts = api.normalizeStructuredDocumentProducts_(
+  structuredData([b2bDepositServiceFee5])
+);
+assert.strictEqual(normalizedClauseProducts.errors.length, 0);
+assert.strictEqual(normalizedClauseProducts.lines.length, 1);
+assert.strictEqual(normalizedClauseProducts.lines[0].product, 'Deposit');
+assert.strictEqual(normalizedClauseProducts.lines[0].overageMethod, 'b2b');
+assert.strictEqual(normalizedClauseProducts.lines[0].bonus, '5');
+assert.strictEqual(
+  normalizedClauseProducts.lines.some(line => line.product === 'Deposit-Commission'),
+  false
+);
+assert.strictEqual(b2bDepositServiceFee5.commission_rate.value, 5);
+assert.strictEqual(b2bDepositServiceFee5.buy_in_price.state, 'NotMentioned');
+const b2bDepositServiceFee5Queue = [
+  queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:5, price:0,
+    share:'', overageMethod:'B2B', overagePrice:0 })
+];
+assert.strictEqual(
+  match(structuredData([b2bDepositServiceFee5]), b2bDepositServiceFee5Queue).result,
+  'MATCH'
+);
+
+// A missing or ambiguous payment method never inherits Queue's Credit Card.
+const unknownMethodCommission5 = travelCommission({
+  deposit_type:field('NotMentioned'), commission_rate:field('Confirmed', 5),
+  buy_in_price:field('NotMentioned')
+});
+assert.strictEqual(
+  match(structuredData([unknownMethodCommission5]), creditCardCommission5Queue).result,
+  'MISMATCH'
+);
+const ambiguousMethodCommission5 = travelCommission({
+  deposit_type:field('Ambiguous'), commission_rate:field('Confirmed', 5),
+  buy_in_price:field('NotMentioned')
+});
+assert.strictEqual(
+  match(structuredData([ambiguousMethodCommission5]), creditCardCommission5Queue).result,
+  'NEEDS_REVIEW'
+);
+
 data = structuredData([travelRsv, travelDeposit, travelCommission()]);
 result = match(data, travelQueue);
 assert.strictEqual(result.result, 'MATCH');

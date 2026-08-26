@@ -99,7 +99,7 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 
 ## 6. 產品展開、差異分類與人工例外
 
-預設產品鍵為 `RSV`、`Deposit`、`Deposit-Commission / Credit Card`、`Deposit-Commission / Virtual ATM`、`Voice`、`Survey`、`eCoupon`、`RwG`。每個 `Product Expansion Rule` 至少須定義啟用條件、來源 canonical fields、Queue 產品列、Blank／Zero／FALSE 語意、明確不續訊號、價格／週期欄位、合約必填欄位與合規範圍。
+預設產品鍵為 `RSV`、`Deposit`、`Deposit-Commission / Credit Card`、`Deposit-Commission / Virtual ATM`、`Voice`、`Survey`、`eCoupon`、`RwG`。`Deposit-Commission` 產品鍵只適用於 B2C；B2B 交易服務費依既有 `Deposit` 欄位處理，不展開 Commission product row。每個 `Product Expansion Rule` 至少須定義啟用條件、來源 canonical fields、Queue 產品列、Blank／Zero／FALSE 語意、明確不續訊號、價格／週期欄位、合約必填欄位與合規範圍。
 
 在業務規則尚未確認前，預設為：所有產品 blank 均 `NEED_MANUAL_REVIEW`；Deposit、兩種 Deposit-Commission 與 RwG 的 `0` 是有效值且保留產品；Virtual ATM 的 `FALSE` 最多是 `Close Candidate`；任何 `Close/Remove` 僅能由已核准人工例外確認。
 
@@ -135,7 +135,7 @@ Gemini 是目前優先 extraction reader，但 Apps Script 不依賴 Gemini-spec
 
 Structured mode 完全忽略 `Full Plan Match`；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可否決 calculated MATCH。blank、boolean `false` 或其他 token 都不是 structured veto。只有 legacy mode 維持原本 `Full Plan Match` 行為。
 
-RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。`Deposit-Commission` 是逐筆交易費率產品，structured `billing_period` 使用 `NotApplicable` 且不參與 Document Comparison；不得依 Queue 或主產品猜測 monthly／annual，仍精確比較 payment method、commission／buy-in 與 row count。固定費 Deposit 的 `monthly → annual ×12` 正規化維持不變。同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
+RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；structured `billing_period` 使用 `NotApplicable` 且不參與 Document Comparison，不得依 Queue 或主產品猜測 monthly／annual，仍精確比較 payment method、commission／buy-in 與 row count。B2B 交易服務費只作為 B2B／Deposit 條文事實，不建立 Commission product row。固定費 Deposit 的 `monthly → annual ×12` 正規化維持不變。同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
 
 `Contract Evidence Review` migration 與所有 structured read／write 均依 header name 定位。已存在欄位 reuse，缺少欄位 append 到最右側，舊欄與舊 implementation 額外欄完整保留。新增 row 依 Sheet 實際欄寬建立，只填 Branch ID、Evidence URL、`Structured Review Version=1`。必要 header duplicate 或 mapping 無法唯一判定時，必須在任何 Sheet write 前停止。
 
@@ -250,4 +250,3 @@ Queue C 欄 `Note` 使用單行文字，不加 `[文件檢查]` 等分類前綴�
 4. 正式 TPR 對 `Close/Remove` 的結束日、解約原因與歷史列處理方式。
 5. 是否存在由法務明定、可替代雙方用印的文件形式。
 6. 同一 Branch ID 的產品期間不同時是否支援。
-7. Deposit-Commission 的信用卡與 Virtual ATM 是否必須是獨立產品列。

@@ -215,8 +215,12 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 ### 9.1 B2B
 
 - B2B Deposit 不建立 `Deposit-Commission` 產品列。
+- B2B 文件中的 transaction service fee／交易服務費百分比只是一種條文語意；structured extraction
+  依既有 B2B／Deposit audit 欄位語意保留在 `Deposit` row，不把它當成 canonical Commission row
+  trigger，也不套用 B2C buy-in／commission mapping。
 - B2B 對應數值直接寫在 Deposit 列的合約贈送組數／指定欄位。
-- 不可因缺少 `Deposit-Commission` 列誤判為新增、移除或方案不完整。
+- 不可因 B2B 文件出現交易服務費就新增 `Deposit-Commission`，也不可因 B2B 缺少該產品列誤判為
+  新增、移除或方案不完整。
 
 ### 9.2 空白與 0
 
@@ -225,12 +229,18 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 
 ### 9.3 B2C／Commission
 
+- 只有 B2C Deposit／payment-method context 會建立 `Deposit-Commission` product row；B2B 不適用。
 - `Deposit-Commission` 的付款週期不是 comparison field；不得因 Queue 繼承 annual／monthly 而要求文件提供或猜測 recurring billing cadence。
 - 合約寫抽成比例時，必須等於 Queue／Renewal DB 的 `Deposit-Commission` 比例。
 - 合約寫買入價格時，應等於 `100% - 抽成比例`。
 - 例如 Queue 抽成 5%，文件可寫抽成 5% 或買入價格 95%。
 - 買入價格 100%、比例空白、數值不同或引用的商業協議缺失，都必須阻擋並列出文件值、Queue 值及正確應有值。
-- 同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
+- Document Comparison 以完整 product multiset 逐列比較每個 payment method、commission／buy-in
+  與產品列數。多費率本身不構成 extraction／comparison 的 `NEEDS_REVIEW`；若文件與 Queue 的每列
+  都能唯一配對且數值一致，structured Document Match 可以是 `MATCH`。
+- Final Policy 是後續獨立 gate：同 Branch 有多個 `Deposit-Commission` 比例時，即使 structured
+  Document Match 為 `MATCH`，既有 protected `depositCommissionAudit_()` 仍回傳 `Need Review`；
+  Document Match 不代表 Final Check Ready，本輪不自動放行多費率案件。
 
 ## 10. 方案家族與特殊申請
 

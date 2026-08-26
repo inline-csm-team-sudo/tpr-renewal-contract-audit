@@ -76,21 +76,69 @@ Product 無法辨識時，仍輸出 placeholder product row，並令 `product.st
   預約組數或對應超額條件，直接 canonicalize 為 `RSV`。
 - `RwG`：文件明確記載 Reserve with Google、Google 預訂／預約等對應服務。
 - `Deposit`：訂金功能／系統的固定月費或年費、Deposit type、setup fee。
-- `Deposit-Commission`：訂金交易抽成、commission rate、信用卡／LINE Pay 等買入價格或交易費率。
+- `Deposit-Commission`：B2C 訂金交易抽成、commission rate、信用卡／Virtual ATM 等買入價格或
+  payment-method transaction rate。B2B 的交易服務費不使用此 canonical product。
 - `Voice`、`Survey`、`eCoupon`：文件能唯一對應該 add-on 時使用。
 
 Ocard、generic add-on 或其他未支援名稱不可硬套 taxonomy；無法唯一對應時輸出 `Ambiguous`。
 
 ### Deposit decomposition
 
-- 「訂金月費／年費 + 信用卡買入價格／抽成」拆成一列 `Deposit` 與至少一列
+- B2C「訂金月費／年費 + 信用卡買入價格／抽成」拆成一列 `Deposit` 與至少一列
   `Deposit-Commission`。
-- 不同 payment method 或不同 rate 各自建立 `Deposit-Commission` row；不得合併成一個範圍、
+- B2C 不同 payment method 或不同 rate 各自建立 `Deposit-Commission` row；不得合併成一個範圍、
   平均值或任選其中一個。
 - Setup Fee 是 `Deposit.setup_fee`，不是獨立產品。
-- B2B 且文件沒有交易抽成／買入價格時，只建立 `Deposit`；不虛構 `Deposit-Commission`。
+- B2B 只建立 `Deposit`，不建立 `Deposit-Commission`。B2B 條文中的 transaction service fee／
+  交易服務費百分比是 clause-recognition fact，依既有 B2B／Deposit 欄位語意保留在 `Deposit` row，
+  不是 Commission row trigger。
 - `commission_rate` 與 `buy_in_price` 按文件字面擷取。文件只寫買入價格時，不由 reader 改寫成
-  抽成；Apps Script 負責 `100 - buy_in_price` 的一致性計算。
+  抽成；B2C `Deposit-Commission` 由 Apps Script 負責 `100 - buy_in_price` 的一致性計算。
+
+### Deposit clause-semantic triggers
+
+以下是 semantic mapping，不是 exact phrase matching。只要 Deposit 或 payment-method 相關條文的
+商業語意相同，即使措辭、換行或標題不同，也必須產生相同的 canonical product rows。
+
+**B2C mandatory row-creation trigger：**只有在 B2C Deposit／payment-method context 下，相關條文明確
+出現 buy-in price／買入價格、B2C commission／抽成比例，或 payment-method transaction rate 時，
+才必須建立 `Deposit-Commission` row；文件不需要直接出現 `Deposit-Commission` 產品名稱。B2C 費率
+不得只存在 Branch-level evidence sidecar 而省略 product row。
+
+B2B 不適用此 trigger。B2B 文件即使明載 transaction service fee／交易服務費百分比，也只把它視為
+B2B Deposit 條文事實，依既有 B2B／Deposit audit 欄位語意保存；不得建立 `Deposit-Commission` row，
+也不得因文字中含有 commission、transaction fee 或百分比而套用 B2C canonical mapping。
+
+- B2C buy-in price 保存文件原始事實於 `buy_in_price`。Reader 不填補衍生的 `commission_rate`；
+  文件未直接寫抽成時使用 `NotMentioned`。Apps Script 再以
+  `commission_rate = 100 - buy_in_price` 正規化後與 Queue 比較。
+- B2C 文件直接明載 commission rate 或 payment-method transaction rate 時，保存於
+  `commission_rate`；未直接寫 buy-in price 時使用 `NotMentioned`。直接抽成不得套用
+  `100 - commission_rate`。
+- Payment method 只從能唯一連結該費率的標題、段落或表格欄位擷取。文件未寫時使用
+  `NotMentioned`；有多種可能時使用 `Ambiguous`；看不清時使用 `Unreadable`。不得猜成
+  `Credit Card` 或 `Virtual ATM`。
+- 每一種 payment method／rate combination 各建一列 `Deposit-Commission`。例如 Credit Card
+  buy-in 95.5% 與 Virtual ATM buy-in 98.5% 必須是兩列，不得合併成 `4.5%, 1.5%`、省略其中一列，
+  或只存在 Branch-level evidence。
+- 固定費與交易費率保持不同產品。文件同時明載月度訂閱費 1,500、transaction setup／creation fee
+  10、Credit Card 與 buy-in 95% 時，至少建立：`Deposit`（monthly、price 1500、setup_fee 10）及
+  `Deposit-Commission`（Credit Card、buy_in_price 95、billing_period `NotApplicable`）。
+- 不使用 Queue 值補足文件事實。文件 buy-in 95% 本身足以讓 Apps Script 計算等價 commission 5%；
+  Queue commission 5% 不能反向證明文件 buy-in 是 95%。
+
+代表性條文與預期 extraction：
+
+| 文件語意 | 必須建立的 Structured Contract Data | Apps Script 正規化 |
+| --- | --- | --- |
+| Credit Card／信用卡預綁卡號；「inline 將以零售價格的95%購買座位」 | 一列 `Deposit-Commission`；`deposit_type=Confirmed("Credit Card")`；`buy_in_price=Confirmed(95)`；`commission_rate=NotMentioned`；`billing_period=NotApplicable` | commission 5 |
+| 信用卡支付 buy-in 95.5%；虛擬帳號轉帳 buy-in 98.5% | 兩列 `Deposit-Commission`：Credit Card／95.5 與 Virtual ATM／98.5；兩列的 `commission_rate=NotMentioned`、`billing_period=NotApplicable` | 分別為 commission 4.5、1.5 |
+| B2B「交易服務費 5%」 | 只建立／保留 `Deposit` row；將 5% 視為 B2B clause-recognition fact，依既有 B2B／Deposit 欄位語意保存；不得建立 `Deposit-Commission` | 不套用 B2C buy-in／commission row normalization |
+
+多費率 B2C 文件只影響 product-row 數與逐列 Document Comparison。若每列 payment method、commission／
+buy-in 與 Queue 均可唯一配對，Document Match 可以是 `MATCH`；目前既有 protected
+`depositCommissionAudit_()` 仍可在 Final Check 階段要求人工 Review。Extraction 不預先產生
+`NEEDS_REVIEW`，也不改變該 protected policy。
 
 ## Product field semantics
 
@@ -113,8 +161,8 @@ Ocard、generic add-on 或其他未支援名稱不可硬套 taxonomy；無法唯
   tier／stairstep 不能簡化成 per-unit。
 - `deposit_type`：保存文件明示的 B2B／B2C 或支付方式語意。
 - `setup_fee`：Deposit 固定建立費。
-- `commission_rate`、`buy_in_price`：Deposit-Commission 的交易抽成或買入價格；多種 payment
-  method 分列。
+- `commission_rate`、`buy_in_price`：B2C `Deposit-Commission` 的交易抽成或買入價格；多種 payment
+  method 分列。B2B 交易服務費依既有 B2B／Deposit row 語意保存，不產生 `Deposit-Commission`。
 
 Schema-required 但未記載的欄位仍要輸出 field object，依 field-state gate 使用
 `NotMentioned` 或 `NotApplicable`，不可漏 key。正常 product 必須至少包含：
@@ -204,6 +252,13 @@ literal row price and billing cadence; contract duration and annual total do not
 billing period or price. Deposit-Commission is a per-transaction rate with no recurring billing cadence:
 set its billing_period to NotApplicable and never infer monthly or annual from the main product, fixed
 Deposit fee, annual total, or Queue.
+
+Apply the Deposit clause-semantic triggers above. Only in B2C Deposit/payment-method context, an explicit
+buy-in price, B2C commission, or payment-method transaction rate requires a Deposit-Commission row even
+when that product name is absent. Create one row per B2C payment method/rate. Preserve a literal buy-in as
+buy_in_price and a direct B2C commission percentage as commission_rate; do not convert one into the other
+in reader output. Resolve payment method only from the document context. B2B transaction-service-fee text
+is a B2B Deposit clause fact and must not create a Deposit-Commission row.
 
 Apply the field-state gate strictly. NotMentioned requires a complete inspection of the product section,
 headers, merged cells, footnotes, attachments, and related text. OCR blank or an omitted extraction is not

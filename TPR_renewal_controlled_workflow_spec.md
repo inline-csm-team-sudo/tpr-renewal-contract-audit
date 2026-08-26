@@ -129,6 +129,8 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 
 Active Batch identity 必須同時用於 evidence index 與 Document Match writer。Index 缺少 current-batch Branch row或遇到 duplicate 時 fail closed並列出 rows；其他 batch 的舊 structured rows不得造成 conflict。Writer 真正寫入前以最新 Sheet snapshot 驗證 target row 的 Branch ID、Review Batch ID、current-batch 唯一性、Version 與 JSON snapshot；任一變更均 zero writes。Active Batch ID 空白時才沿用原本 legacy structured-intent／writer 行為。
 
+`Plan Classification Review` 的 read identity 與 trace writer 亦使用 `Branch ID + Active Contract Review Batch ID`。Active Batch 有值時，每個 Queue Branch 必須恰好一筆 current-batch row；缺列、duplicate、indexing 後 Branch／Batch／row identity 改變都在任何 Plan trace write 前 fail closed 並全批 zero writes。其他／blank batch rows 是 historical，不能參與判斷或被 writer 更新。Active Batch 空白時才保留 legacy first-matching-row read／write workflow。
+
 Schema 的 `evidence_set.state=Confirmed`、`complete=true` 必須代表已完成該 Branch relevant evidence set 盤點，並在 `relevant_source_ids` 列出全部 relevant files。Folder 不要求每一檔案建立 product rows，但只讀單一 PDF 不等於 evidence set complete；無法判定完整時使用 `Ambiguous`，Branch 不得 Ready。每個 product 的 `source_id` 必須屬於 relevant source IDs。
 
 Gemini 是目前優先 extraction reader，但 Apps Script 不依賴 Gemini-specific output。任何 reader 只輸出固定 schema 的文件事實與 `Confirmed`／`NotMentioned`／`Unreadable`／`Ambiguous`／`NotApplicable` states；Apps Script 才能計算並寫入 `Document Match Result` 與 `Document Match Detail`。Reader 提供的 MATCH／MISMATCH 欄位即使存在也沒有 authority。

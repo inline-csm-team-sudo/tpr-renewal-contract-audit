@@ -7,7 +7,8 @@ globalThis.__test = {
   headerIndex_, structuredDocumentMatchAudit_, structuredReviewForProtectedGates_,
   contractAudit_, decideAuditStatus_, headerNameMigrationPlan_, missingEvidenceReviewRows_,
   ensureReviewSheetHeadersByName_, writeDocumentMatchTraces_, isExplicitStructuredPlanVeto_,
-  indexedEvidenceReviews_, normalizeStructuredDocumentProducts_,
+  indexedEvidenceReviews_, indexedPlanClassificationReviews_,
+  writePlanClassificationTraces_, normalizeStructuredDocumentProducts_,
   evidenceReviewHeaders:EVIDENCE_REVIEW_HEADERS
 };`;
 const context = {
@@ -926,5 +927,147 @@ assert.throws(
   /Structured Contract Data.*indexing snapshot/
 );
 assert.strictEqual(traceSheet.writes.length, 0);
+
+// Plan Classification trace identity is scoped to the Active Contract Review Batch.
+const planHeaders = [
+  'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
+  'Reviewer', 'Reviewed At', 'Notes', 'First Contract Start Date', 'Expected Plan Family',
+  'Original Plan Code', 'New Plan Code', 'Catalog Match Rule', 'Catalog Exception',
+  'Origin Source', 'Review Batch ID'
+];
+function planRow(branchId, batchId = '', matchRule = '') {
+  return [branchId, '', '', '', '', '', '', '', '', '', '', matchRule, '', '', batchId];
+}
+function planSheet(rows) {
+  const values = [planHeaders].concat(rows.map(row => row.slice()));
+  const writes = [];
+  return {
+    values,
+    writes,
+    getName:() => 'Plan Classification Review',
+    getDataRange:() => ({ getValues:() => values.map(row => row.slice()) }),
+    getRange:(row, column, rowCount, columnCount) => ({
+      setValues:newValues => {
+        writes.push({ row, column, rowCount, columnCount, values:newValues });
+        newValues.forEach((newRow, rowOffset) => newRow.forEach((value, columnOffset) => {
+          values[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+        }));
+      }
+    })
+  };
+}
+function planTraceFor(entry, branchId = 'B1') {
+  return [{
+    branchId,
+    targetRowNumber:entry.targetRowNumber,
+    reviewBatchId:entry.reviewBatchId,
+    origin:{ firstContractStart:'2024-01-01', source:'Legacy Branch Master!2' },
+    planAudit:{
+      oldFamily:'Public', newFamily:'Public', expectedFamily:'Public',
+      oldPlanCode:'TMS-0001', newPlanCode:'TMS-0001',
+      matchRule:'current trace', reason:''
+    }
+  }];
+}
+function planWrittenRows(sheet) {
+  return Array.from(new Set(sheet.writes.map(write => write.row))).sort((a, b) => a - b);
+}
+
+// Historical row before current row: only the current-batch row is the writer target.
+let planTraceSheet = planSheet([
+  planRow('B1', '', 'historical-before'),
+  planRow('B1', activeBatchId, 'current-before-write')
+]);
+let planIndex = api.indexedPlanClassificationReviews_(
+  planTraceSheet, 'Branch ID', ['B1'], activeBatchId
+);
+assert.strictEqual(planIndex.B1.targetRowNumber, 3);
+const historicalBefore = planTraceSheet.values[1].slice();
+api.writePlanClassificationTraces_(planTraceSheet, planTraceFor(planIndex.B1), activeBatchId);
+assert.deepStrictEqual(planWrittenRows(planTraceSheet), [3]);
+assert.deepStrictEqual(planTraceSheet.values[1], historicalBefore);
+assert.strictEqual(planTraceSheet.values[2][11], 'current trace');
+
+// Historical row after current row: the current row still remains the only target.
+planTraceSheet = planSheet([
+  planRow('B1', activeBatchId, 'current-before-write'),
+  planRow('B1', 'REVIEW-OLD', 'historical-after')
+]);
+planIndex = api.indexedPlanClassificationReviews_(
+  planTraceSheet, 'Branch ID', ['B1'], activeBatchId
+);
+assert.strictEqual(planIndex.B1.targetRowNumber, 2);
+const historicalAfter = planTraceSheet.values[2].slice();
+api.writePlanClassificationTraces_(planTraceSheet, planTraceFor(planIndex.B1), activeBatchId);
+assert.deepStrictEqual(planWrittenRows(planTraceSheet), [2]);
+assert.deepStrictEqual(planTraceSheet.values[2], historicalAfter);
+
+// Missing or duplicate current-batch rows fail closed before any trace write.
+planTraceSheet = planSheet([planRow('B1', 'REVIEW-OLD')]);
+assert.throws(
+  () => api.indexedPlanClassificationReviews_(planTraceSheet, 'Branch ID', ['B1'], activeBatchId),
+  /REVIEW-CURRENT.*缺少 Branch rows.*B1/
+);
+assert.strictEqual(planTraceSheet.writes.length, 0);
+
+planTraceSheet = planSheet([
+  planRow('B1', activeBatchId),
+  planRow('B1', activeBatchId)
+]);
+assert.throws(
+  () => api.indexedPlanClassificationReviews_(planTraceSheet, 'Branch ID', ['B1'], activeBatchId),
+  /REVIEW-CURRENT.*B1 rows 2, 3/
+);
+assert.strictEqual(planTraceSheet.writes.length, 0);
+
+// Latest-snapshot identity changes or duplicates cause zero writes.
+['branch', 'batch', 'duplicate'].forEach(change => {
+  planTraceSheet = planSheet([
+    planRow('B1', activeBatchId),
+    planRow('B1', 'REVIEW-OLD', 'historical')
+  ]);
+  planIndex = api.indexedPlanClassificationReviews_(
+    planTraceSheet, 'Branch ID', ['B1'], activeBatchId
+  );
+  const traces = planTraceFor(planIndex.B1);
+  if (change === 'branch') planTraceSheet.values[1][0] = 'CHANGED';
+  if (change === 'batch') planTraceSheet.values[1][14] = 'REVIEW-CHANGED';
+  if (change === 'duplicate') planTraceSheet.values.push(planRow('B1', activeBatchId));
+  assert.throws(
+    () => api.writePlanClassificationTraces_(planTraceSheet, traces, activeBatchId),
+    /preflight/i
+  );
+  assert.strictEqual(planTraceSheet.writes.length, 0, change + ' failure must write nothing');
+});
+
+// One stale target in a multi-Branch batch prevents every otherwise valid write.
+planTraceSheet = planSheet([
+  planRow('B1', activeBatchId),
+  planRow('B2', activeBatchId)
+]);
+planIndex = api.indexedPlanClassificationReviews_(
+  planTraceSheet, 'Branch ID', ['B1', 'B2'], activeBatchId
+);
+const multiBranchTraces = planTraceFor(planIndex.B1, 'B1').concat(
+  planTraceFor(planIndex.B2, 'B2')
+);
+planTraceSheet.values[2][14] = 'REVIEW-CHANGED';
+assert.throws(
+  () => api.writePlanClassificationTraces_(planTraceSheet, multiBranchTraces, activeBatchId),
+  /preflight/i
+);
+assert.strictEqual(planTraceSheet.writes.length, 0);
+
+// Blank Active Batch preserves the legacy first-matching-row read/write behavior.
+planTraceSheet = planSheet([
+  planRow('B1', 'REVIEW-OLD', 'legacy-first'),
+  planRow('B1', 'REVIEW-CURRENT', 'later-row')
+]);
+planIndex = api.indexedPlanClassificationReviews_(planTraceSheet, 'Branch ID', ['B1'], '');
+assert.strictEqual(planIndex.B1.targetRowNumber, 2);
+const laterLegacyRow = planTraceSheet.values[2].slice();
+api.writePlanClassificationTraces_(planTraceSheet, planTraceFor(planIndex.B1), '');
+assert.deepStrictEqual(planWrittenRows(planTraceSheet), [2]);
+assert.deepStrictEqual(planTraceSheet.values[2], laterLegacyRow);
 
 console.log('Structured document comparison regression: all cases passed.');

@@ -479,13 +479,17 @@ function runContractAudit() {
     ss.getSheetByName('Contract Evidence Review'), 'Branch ID', Object.keys(byBranch),
     activeContractReviewBatchId
   );
-  const plans = indexedReview_(ss.getSheetByName('Plan Classification Review'), 'Branch ID');
+  const planReviewSheet = ss.getSheetByName('Plan Classification Review');
+  const plans = indexedPlanClassificationReviews_(
+    planReviewSheet, 'Branch ID', Object.keys(byBranch), activeContractReviewBatchId
+  );
   const approvals = indexedReview_(ss.getSheetByName('Special Approval Review'), 'Branch ID');
   const shares = indexedReview_(ss.getSheetByName('Share Group Review'), 'Share Plan ID');
   const bonusReference = loadRsvBonusReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const familyReference = loadRsvFamilyReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const resultRows = [];
   const documentMatchTraces = [];
+  const planClassificationTraces = [];
   const affectedCatalogChanges = {};
   let readyBranches = 0;
 
@@ -498,7 +502,8 @@ function runContractAudit() {
     const planChange = comparison.planChange;
     const evidenceEntry = evidence[branchId] || null;
     const ev = evidenceEntry ? evidenceEntry.review : {};
-    const plan = plans[branchId] || {};
+    const planEntry = plans[branchId] || null;
+    const plan = planEntry ? planEntry.review : {};
     const approval = approvals[branchId] || {};
     const share = shareAudit_(queueRows, qx, shares, shareOverage);
     const renewalDataMissing = queueRows.some(r => auditText_(auditGet_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
@@ -571,10 +576,21 @@ function runContractAudit() {
       auditSet_(output, qx, 'Reviewed At', new Date());
       resultRows.push(output);
     });
-    writePlanClassificationTrace_(ss.getSheetByName('Plan Classification Review'), branchId, origin, planAudit);
+    if (planEntry) {
+      planClassificationTraces.push({
+        branchId,
+        targetRowNumber:planEntry.targetRowNumber,
+        reviewBatchId:planEntry.reviewBatchId,
+        origin,
+        planAudit
+      });
+    }
   });
 
   recordPlanChangeAffectedBranches_(ss.getSheetByName('Plan Catalog Change Review'), affectedCatalogChanges);
+  writePlanClassificationTraces_(
+    planReviewSheet, planClassificationTraces, activeContractReviewBatchId
+  );
   writeDocumentMatchTraces_(
     ss.getSheetByName('Contract Evidence Review'), documentMatchTraces,
     activeContractReviewBatchId
@@ -1200,6 +1216,89 @@ function indexedReview_(sheet, keyHeader) {
     if (!id || out[id]) return;
     out[id] = values[0].reduce((o, h, i) => (o[String(h)] = row[i], o), {});
   });
+  return out;
+}
+
+function indexedPlanClassificationReviews_(sheet, keyHeader, relevantIds, activeBatchId) {
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return {};
+  const headers = values[0].map(String);
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [keyHeader];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(headers, requiredHeaders, sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' plan review index missing headers: ' + plan.missing.join(', '));
+  }
+  const keyColumn = plan.positions[keyHeader];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
+  const relevant = Array.isArray(relevantIds)
+    ? relevantIds.reduce((out, id) => (out[auditText_(id)] = true, out), {})
+    : null;
+  const entriesById = {};
+
+  values.slice(1).forEach((row, index) => {
+    const id = auditText_(row[keyColumn]);
+    if (!id || relevant && !relevant[id]) return;
+    if (!entriesById[id]) entriesById[id] = [];
+    entriesById[id].push({
+      rowNumber:index + 2,
+      review:headers.reduce((out, header, column) => (out[header] = row[column], out), {}),
+      reviewBatchId:batchColumn === null ? '' : auditText_(row[batchColumn])
+    });
+  });
+
+  const duplicateErrors = [];
+  const missingErrors = [];
+  const out = {};
+  const ids = currentBatchId
+    ? (relevant ? Object.keys(relevant) : Object.keys(entriesById).filter(id =>
+      entriesById[id].some(entry => entry.reviewBatchId === currentBatchId)))
+    : Object.keys(entriesById);
+  ids.forEach(id => {
+    const entries = entriesById[id] || [];
+    if (!currentBatchId) {
+      if (!entries.length) return;
+      const selected = entries[0];
+      out[id] = {
+        review:selected.review,
+        rowNumber:selected.rowNumber,
+        targetRowNumber:selected.rowNumber,
+        reviewBatchId:selected.reviewBatchId,
+        currentBatchMode:false
+      };
+      return;
+    }
+    const currentEntries = entries.filter(entry => entry.reviewBatchId === currentBatchId);
+    if (!currentEntries.length) {
+      missingErrors.push(id);
+      return;
+    }
+    if (currentEntries.length > 1) {
+      duplicateErrors.push(id + ' rows ' + currentEntries.map(entry => entry.rowNumber).join(', '));
+      return;
+    }
+    const selected = currentEntries[0];
+    out[id] = {
+      review:selected.review,
+      rowNumber:selected.rowNumber,
+      targetRowNumber:selected.rowNumber,
+      reviewBatchId:currentBatchId,
+      currentBatchMode:true
+    };
+  });
+  if (currentBatchId && (duplicateErrors.length || missingErrors.length)) {
+    const errors = [];
+    if (duplicateErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」有重複 Branch rows：' +
+        duplicateErrors.join('；'));
+    }
+    if (missingErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」缺少 Branch rows：' +
+        missingErrors.join(', '));
+    }
+    throw new Error(sheet.getName() + ' plan review identity failed: ' + errors.join('；'));
+  }
   return out;
 }
 
@@ -3152,25 +3251,106 @@ function recordPlanChangeAffectedBranches_(sheet, affected) {
   if (changed) sheet.getRange(2, 1, values.length - 1, values[0].length).setValues(values.slice(1));
 }
 
-function writePlanClassificationTrace_(sheet, branchId, origin, planAudit) {
-  if (!sheet) return;
+function writePlanClassificationTraces_(sheet, traces, activeBatchId) {
+  if (!sheet || !traces || !traces.length) return;
   const values = sheet.getDataRange().getValues();
-  const ix = headerIndex_(values[0].map(String));
-  const branchColumn = requiredHeader_(ix, 'Branch ID', sheet.getName());
-  const rowIndex = values.slice(1).findIndex(row => auditText_(row[branchColumn]) === branchId);
-  if (rowIndex < 0) return;
-  const row = values[rowIndex + 1].slice();
-  const put = (header, value) => { const column = requiredHeader_(ix, header, sheet.getName()); row[column] = value; };
-  put('Original Plan Family', planAudit.oldFamily);
-  put('New Plan Family', planAudit.newFamily);
-  put('First Contract Start Date', origin && origin.firstContractStart ? origin.firstContractStart : '');
-  put('Expected Plan Family', planAudit.expectedFamily || planAudit.oldFamily || '');
-  put('Original Plan Code', planAudit.oldPlanCode || '');
-  put('New Plan Code', planAudit.newPlanCode || '');
-  put('Catalog Match Rule', planAudit.matchRule || '');
-  put('Catalog Exception', planAudit.reason || '');
-  put('Origin Source', origin && origin.source || '');
-  sheet.getRange(rowIndex + 2, 1, 1, values[0].length).setValues([row]);
+  if (values.length < 2) return;
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [
+    'Branch ID', 'Original Plan Family', 'New Plan Family', 'First Contract Start Date',
+    'Expected Plan Family', 'Original Plan Code', 'New Plan Code', 'Catalog Match Rule',
+    'Catalog Exception', 'Origin Source'
+  ];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(values[0].map(String), requiredHeaders, sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' cannot write Plan Classification trace; missing headers: ' +
+      plan.missing.join(', '));
+  }
+  const branchColumn = plan.positions['Branch ID'];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
+  const preflightErrors = [];
+  const targetRows = {};
+  const targetBranches = {};
+  const updates = traces.map((trace, index) => {
+    const label = 'trace ' + (index + 1);
+    const branchId = auditText_(trace && trace.branchId);
+    const rowNumber = Number(trace && trace.targetRowNumber);
+    const traceBatchId = auditText_(trace && trace.reviewBatchId);
+    if (!branchId) preflightErrors.push(label + ' 缺少 Branch ID');
+    if (currentBatchId && traceBatchId !== currentBatchId) {
+      preflightErrors.push(label + ' Review Batch ID 不一致：預期 ' + currentBatchId +
+        '，trace 為 ' + (traceBatchId || '空白'));
+    }
+    if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > values.length) {
+      preflightErrors.push(label + ' targetRowNumber 無效：' + auditText_(trace && trace.targetRowNumber));
+      return null;
+    }
+    if (targetRows[rowNumber]) {
+      preflightErrors.push('target row ' + rowNumber + ' 同時被 ' + targetRows[rowNumber] +
+        ' 與 ' + branchId + ' 指定');
+    } else {
+      targetRows[rowNumber] = branchId;
+    }
+    if (targetBranches[branchId]) {
+      preflightErrors.push('Branch ' + branchId + ' 有多個 writer targets：' +
+        targetBranches[branchId] + ', ' + rowNumber);
+    } else if (branchId) {
+      targetBranches[branchId] = rowNumber;
+    }
+    const row = values[rowNumber - 1];
+    const actualBranchId = auditText_(row[branchColumn]);
+    if (actualBranchId !== branchId) {
+      preflightErrors.push('row ' + rowNumber + ' Branch ID 已變更：預期 ' + branchId +
+        '，目前 ' + actualBranchId);
+    }
+    if (currentBatchId && auditText_(row[batchColumn]) !== currentBatchId) {
+      preflightErrors.push('row ' + rowNumber + ' Review Batch ID 已變更：預期 ' + currentBatchId +
+        '，目前 ' + (auditText_(row[batchColumn]) || '空白'));
+    }
+    const origin = trace && trace.origin || {};
+    const planAudit = trace && trace.planAudit || {};
+    const output = row.slice();
+    const put = (header, value) => { output[plan.positions[header]] = value; };
+    put('Original Plan Family', planAudit.oldFamily || '');
+    put('New Plan Family', planAudit.newFamily || '');
+    put('First Contract Start Date', origin.firstContractStart || '');
+    put('Expected Plan Family', planAudit.expectedFamily || planAudit.oldFamily || '');
+    put('Original Plan Code', planAudit.oldPlanCode || '');
+    put('New Plan Code', planAudit.newPlanCode || '');
+    put('Catalog Match Rule', planAudit.matchRule || '');
+    put('Catalog Exception', planAudit.reason || '');
+    put('Origin Source', origin.source || '');
+    return { rowNumber, values:output };
+  });
+
+  Object.keys(targetBranches).forEach(branchId => {
+    const candidateRows = [];
+    values.slice(1).forEach((row, index) => {
+      if (auditText_(row[branchColumn]) !== branchId) return;
+      if (!currentBatchId || auditText_(row[batchColumn]) === currentBatchId) {
+        candidateRows.push(index + 2);
+      }
+    });
+    const expectedRow = targetBranches[branchId];
+    const identityMatches = currentBatchId
+      ? candidateRows.length === 1 && candidateRows[0] === expectedRow
+      : candidateRows.length > 0 && candidateRows[0] === expectedRow;
+    if (!identityMatches) {
+      preflightErrors.push('Branch ' + branchId + ' 的最新 Sheet snapshot ' +
+        (currentBatchId
+          ? '在 Active Contract Review Batch「' + currentBatchId + '」必須只有 target row '
+          : '的 legacy first matching row 必須仍為 target row ') +
+        expectedRow + '；目前 rows：' + (candidateRows.length ? candidateRows.join(', ') : '無'));
+    }
+  });
+  if (preflightErrors.length) {
+    throw new Error(sheet.getName() + ' Plan Classification writer preflight failed: ' +
+      preflightErrors.join('；'));
+  }
+  updates.forEach(update => {
+    sheet.getRange(update.rowNumber, 1, 1, values[0].length).setValues([update.values]);
+  });
 }
 
 function decideAuditStatus_(renewalDataMissing, catalogChange, sourceDates, longTerm, contract, bonus, plan, special, share) {

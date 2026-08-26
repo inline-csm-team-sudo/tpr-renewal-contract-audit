@@ -145,6 +145,7 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - Structured mode 完全不讀 `Full Plan Match` 作為 manual veto；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可以否決 Apps Script 計算出的 MATCH。blank、checkbox 預設的 boolean `false` 與其他 token 都不構成 veto。Structured data 不存在的 legacy review 才維持原本 `Full Plan Match` 行為。
 - `Contract Evidence Review` migration 必須依完整 header name 定位。既有 header reuse，缺少的新 header append 到最右側，舊版額外欄保留；不得刪除、重新排序或覆蓋。必要 header duplicate 或無法唯一 mapping 時必須在任何 Sheet write 前 fail closed。
 - Document Match writer 必須以 index 傳遞的實際 `targetRowNumber`、`Review Batch ID`、Version 與 JSON snapshot 寫入。Active Batch mode 下，真正寫入前須重新讀最新 Sheet snapshot，確認 target row 的 Branch ID／Batch ID 未變、它仍是該 Branch 在 current batch 的唯一 row、Version `1` 與 JSON 非空且都和 indexing snapshot 一致。任一 identity／內容改變或 current-batch duplicate 必須 zero writes 並 fail closed；其他 batch／blank-batch historical rows不得造成 conflict，也不得被寫入。Legacy mode 維持原本「唯一完整 structured row」writer preflight。
+- `Plan Classification Review` 在 Active Batch mode 使用相同的 `Branch ID + Review Batch ID` identity：每個 Queue Branch 在 current batch 必須恰好一列，缺列或重複列均在 trace write 前 fail closed，其他／blank batch rows 一律是 historical。Plan trace 必須攜帶 indexing 取得的 `targetRowNumber`；writer 在任何 trace write 前重新讀最新 Sheet snapshot，確認 Branch、Batch、current-batch 唯一性與 row number 都未改變，任一不符即全批 zero writes。只有 Active Batch ID 空白時才保留 legacy first-matching-row read／write 行為。
 
 ## 6. 原方案續約與方案變更
 

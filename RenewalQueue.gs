@@ -474,8 +474,10 @@ function runContractAudit() {
   const byBranch = groupBy_(rows, r => auditText_(auditGet_(r.values, qx, 'Branch ID')));
   const origins = loadLegacyBranchOrigins_(ss, control, Object.keys(byBranch));
   const shareOverageSource = shareOverageSourceAudit_(ss, control, byBranch, qx);
+  const activeContractReviewBatchId = auditText_(control['Active Contract Review Batch ID']);
   const evidence = indexedEvidenceReviews_(
-    ss.getSheetByName('Contract Evidence Review'), 'Branch ID', Object.keys(byBranch)
+    ss.getSheetByName('Contract Evidence Review'), 'Branch ID', Object.keys(byBranch),
+    activeContractReviewBatchId
   );
   const plans = indexedReview_(ss.getSheetByName('Plan Classification Review'), 'Branch ID');
   const approvals = indexedReview_(ss.getSheetByName('Special Approval Review'), 'Branch ID');
@@ -501,13 +503,22 @@ function runContractAudit() {
     const share = shareAudit_(queueRows, qx, shares, shareOverage);
     const renewalDataMissing = queueRows.some(r => auditText_(auditGet_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
     const billing = billingCycleAudit_(ev, queueRows, qx);
-    const documentMatch = structuredDocumentMatchAudit_(ev, queueRows, qx);
+    let documentMatch = structuredDocumentMatchAudit_(ev, queueRows, qx);
+    if (evidenceEntry && evidenceEntry.currentBatchMode && documentMatch.result === 'NO_STRUCTURED_DATA') {
+      const reason = '目前 Active Contract Review Batch「' + evidenceEntry.reviewBatchId + '」row ' +
+        evidenceEntry.rowNumber + ' 已進入 structured review，但 Structured Review Version／' +
+        'Structured Contract Data 缺失；不得 fallback 到 historical Full Plan Match';
+      documentMatch = { result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason };
+    }
     const contractReview = structuredReviewForProtectedGates_(ev, documentMatch);
     const contract = contractAudit_(contractReview, documentMatch, planChange, billing, queueRows, qx, control, comparison.reason);
     if (evidenceEntry && evidenceEntry.targetRowNumber !== null) {
       documentMatchTraces.push(Object.assign({}, documentMatch, {
         branchId,
-        targetRowNumber:evidenceEntry.targetRowNumber
+        targetRowNumber:evidenceEntry.targetRowNumber,
+        reviewBatchId:evidenceEntry.reviewBatchId,
+        expectedStructuredReviewVersion:auditText_(ev['Structured Review Version']),
+        expectedStructuredContractData:auditText_(ev['Structured Contract Data'])
       }));
     }
     const bonus = bonusCountAudit_(queueRows, qx, bonusReference, control);
@@ -564,7 +575,10 @@ function runContractAudit() {
   });
 
   recordPlanChangeAffectedBranches_(ss.getSheetByName('Plan Catalog Change Review'), affectedCatalogChanges);
-  writeDocumentMatchTraces_(ss.getSheetByName('Contract Evidence Review'), documentMatchTraces);
+  writeDocumentMatchTraces_(
+    ss.getSheetByName('Contract Evidence Review'), documentMatchTraces,
+    activeContractReviewBatchId
+  );
 
   queue.getRange(2, 1, resultRows.length, queueHeaders.length).setValues(resultRows);
   queue.getRange(2, requiredHeader_(qx, 'Check', 'Queue') + 1, resultRows.length, 1)
@@ -1189,19 +1203,21 @@ function indexedReview_(sheet, keyHeader) {
   return out;
 }
 
-function indexedEvidenceReviews_(sheet, keyHeader, relevantIds) {
+function indexedEvidenceReviews_(sheet, keyHeader, relevantIds, activeBatchId) {
   const values = sheet.getDataRange().getValues();
   if (!values.length) return {};
   const headers = values[0].map(String);
-  const plan = headerNameMigrationPlan_(headers, [
-    keyHeader, 'Structured Review Version', 'Structured Contract Data'
-  ], sheet.getName());
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [keyHeader, 'Structured Review Version', 'Structured Contract Data'];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(headers, requiredHeaders, sheet.getName());
   if (plan.missing.length) {
     throw new Error(sheet.getName() + ' evidence index missing headers: ' + plan.missing.join(', '));
   }
   const keyColumn = plan.positions[keyHeader];
   const versionColumn = plan.positions['Structured Review Version'];
   const dataColumn = plan.positions['Structured Contract Data'];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
   const relevant = Array.isArray(relevantIds)
     ? relevantIds.reduce((out, id) => (out[auditText_(id)] = true, out), {})
     : null;
@@ -1214,15 +1230,43 @@ function indexedEvidenceReviews_(sheet, keyHeader, relevantIds) {
     entriesById[id].push({
       rowNumber:index + 2,
       review:headers.reduce((out, header, column) => (out[header] = row[column], out), {}),
+      reviewBatchId:batchColumn === null ? '' : auditText_(row[batchColumn]),
       structuredIntent:auditText_(row[versionColumn]) !== '' || auditText_(row[dataColumn]) !== '',
       activeStructured:auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== ''
     });
   });
 
   const duplicateErrors = [];
+  const missingErrors = [];
   const out = {};
-  Object.keys(entriesById).forEach(id => {
+  const ids = currentBatchId
+    ? (relevant ? Object.keys(relevant) : Object.keys(entriesById).filter(id =>
+      entriesById[id].some(entry => entry.reviewBatchId === currentBatchId)))
+    : Object.keys(entriesById);
+  ids.forEach(id => {
     const entries = entriesById[id];
+    if (currentBatchId) {
+      const currentEntries = (entries || []).filter(entry => entry.reviewBatchId === currentBatchId);
+      if (!currentEntries.length) {
+        missingErrors.push(id);
+        return;
+      }
+      if (currentEntries.length > 1) {
+        duplicateErrors.push(id + ' rows ' + currentEntries.map(entry => entry.rowNumber).join(', '));
+        return;
+      }
+      const selected = currentEntries[0];
+      out[id] = {
+        review:selected.review,
+        rowNumber:selected.rowNumber,
+        targetRowNumber:selected.activeStructured ? selected.rowNumber : null,
+        reviewBatchId:currentBatchId,
+        currentBatchMode:true,
+        structuredIntent:true
+      };
+      return;
+    }
+
     const structured = entries.filter(entry => entry.activeStructured);
     const structuredIntent = entries.filter(entry => entry.structuredIntent);
     if (structured.length > 1) {
@@ -1235,12 +1279,27 @@ function indexedEvidenceReviews_(sheet, keyHeader, relevantIds) {
     out[id] = {
       review:selected.review,
       rowNumber:selected.rowNumber,
-      targetRowNumber:structured.length === 1 ? selected.rowNumber : null
+      targetRowNumber:structured.length === 1 ? selected.rowNumber : null,
+      reviewBatchId:selected.reviewBatchId,
+      currentBatchMode:false,
+      structuredIntent:selected.structuredIntent
     };
   });
-  if (duplicateErrors.length) {
+  if (!currentBatchId && duplicateErrors.length) {
     throw new Error(sheet.getName() + ' has duplicate active structured review rows: ' +
       duplicateErrors.join('；'));
+  }
+  if (currentBatchId && (duplicateErrors.length || missingErrors.length)) {
+    const errors = [];
+    if (duplicateErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」有重複 Branch rows：' +
+        duplicateErrors.join('；'));
+    }
+    if (missingErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」缺少 Branch rows：' +
+        missingErrors.join(', '));
+    }
+    throw new Error(sheet.getName() + ' evidence identity failed: ' + errors.join('；'));
   }
   return out;
 }
@@ -1941,14 +2000,17 @@ function uniqueConfirmedStructuredNumbers_(rows, fieldName) {
   return [...new Set(values)];
 }
 
-function writeDocumentMatchTraces_(sheet, traces) {
+function writeDocumentMatchTraces_(sheet, traces, activeBatchId) {
   if (!sheet || !traces || !traces.length) return;
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) return;
-  const plan = headerNameMigrationPlan_(values[0].map(String), [
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [
     'Branch ID', 'Structured Review Version', 'Structured Contract Data',
     'Document Match Result', 'Document Match Detail'
-  ], sheet.getName());
+  ];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(values[0].map(String), requiredHeaders, sheet.getName());
   if (plan.missing.length) {
     throw new Error(sheet.getName() + ' cannot write Document Match trace; missing headers: ' + plan.missing.join(', '));
   }
@@ -1957,6 +2019,7 @@ function writeDocumentMatchTraces_(sheet, traces) {
   const dataColumn = plan.positions['Structured Contract Data'];
   const resultColumn = plan.positions['Document Match Result'];
   const detailColumn = plan.positions['Document Match Detail'];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
   const preflightErrors = [];
   const targetRows = {};
   const targetBranches = {};
@@ -1964,7 +2027,14 @@ function writeDocumentMatchTraces_(sheet, traces) {
     const label = 'trace ' + (index + 1);
     const branchId = auditText_(trace && trace.branchId);
     const rowNumber = Number(trace && trace.targetRowNumber);
+    const traceBatchId = auditText_(trace && trace.reviewBatchId);
+    const expectedVersion = auditText_(trace && trace.expectedStructuredReviewVersion);
+    const expectedData = auditText_(trace && trace.expectedStructuredContractData);
     if (!branchId) preflightErrors.push(label + ' 缺少 Branch ID');
+    if (currentBatchId && traceBatchId !== currentBatchId) {
+      preflightErrors.push(label + ' Review Batch ID 不一致：預期 ' + currentBatchId +
+        '，trace 為 ' + (traceBatchId || '空白'));
+    }
     if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > values.length) {
       preflightErrors.push(label + ' targetRowNumber 無效：' + auditText_(trace && trace.targetRowNumber));
       return null;
@@ -1985,11 +2055,23 @@ function writeDocumentMatchTraces_(sheet, traces) {
     if (actualBranchId !== branchId) {
       preflightErrors.push('row ' + rowNumber + ' Branch ID 已變更：預期 ' + branchId + '，目前 ' + actualBranchId);
     }
-    if (auditText_(row[versionColumn]) !== '1') {
+    const actualVersion = auditText_(row[versionColumn]);
+    const actualData = auditText_(row[dataColumn]);
+    if (currentBatchId && auditText_(row[batchColumn]) !== currentBatchId) {
+      preflightErrors.push('row ' + rowNumber + ' Review Batch ID 已變更：預期 ' + currentBatchId +
+        '，目前 ' + (auditText_(row[batchColumn]) || '空白'));
+    }
+    if (actualVersion !== '1') {
       preflightErrors.push('row ' + rowNumber + ' Structured Review Version 不是 1');
     }
-    if (auditText_(row[dataColumn]) === '') {
+    if (actualData === '') {
       preflightErrors.push('row ' + rowNumber + ' Structured Contract Data 已清空');
+    }
+    if (actualVersion !== expectedVersion) {
+      preflightErrors.push('row ' + rowNumber + ' Structured Review Version 與 indexing snapshot 不一致');
+    }
+    if (actualData !== expectedData) {
+      preflightErrors.push('row ' + rowNumber + ' Structured Contract Data 與 indexing snapshot 不一致');
     }
     return {
       rowNumber,
@@ -2001,14 +2083,17 @@ function writeDocumentMatchTraces_(sheet, traces) {
     const activeRows = [];
     values.slice(1).forEach((row, index) => {
       if (auditText_(row[branchColumn]) !== branchId) return;
-      if (auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== '') {
+      if (currentBatchId) {
+        if (auditText_(row[batchColumn]) === currentBatchId) activeRows.push(index + 2);
+      } else if (auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== '') {
         activeRows.push(index + 2);
       }
     });
     const expectedRow = targetBranches[branchId];
     if (activeRows.length !== 1 || activeRows[0] !== expectedRow) {
       preflightErrors.push('Branch ' + branchId + ' 的最新 Sheet snapshot 必須只有 target row ' +
-        expectedRow + ' 是完整 active structured row；目前 rows：' +
+        expectedRow + (currentBatchId ? ' 屬於 Active Contract Review Batch「' + currentBatchId + '」' :
+          ' 是完整 active structured row') + '；目前 rows：' +
         (activeRows.length ? activeRows.join(', ') : '無'));
     }
   });

@@ -125,9 +125,9 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 
 文件連結可以是 Drive 單一檔案或資料夾；資料夾必須展開並閱讀全部相關檔案。覆核 ID 綁定 Queue 連結本身的檔案 ID／資料夾 ID，且 `/file/d/<id>`、`/d/<id>`、`/folders/<id>` 與 `?id=<id>` 均須正確解析。Queue 連結與覆核 ID 不一致時必須 fail closed，不能沿用舊結論。
 
-新版文件覆核以 `Structured Review Version=1` 與 provider-neutral `Structured Contract Data` 作為 extraction interface；新建立的 Contract Evidence Review row 由程式自動標記 version 1。只要 Version 或 JSON 任一存在，就不得 fallback 到 legacy `Full Plan Match=TRUE`；JSON 缺失、無效、schema 不支援或 extraction 無法完成時必須 `NEEDS_REVIEW`。只有兩欄皆空白的歷史覆核可沿用舊 fallback。
+新版文件覆核以 `Structured Review Version=1` 與 provider-neutral `Structured Contract Data` 作為 extraction interface。`Active Contract Review Batch ID` 有值時，只以相同 `Review Batch ID` 的 current-batch rows 作為本次 evidence identity；每個 Queue Branch 必須恰好一列，其他／blank batch rows 均為 historical。Current-batch row 本身代表 structured intent；Version／JSON 任一缺失、無效、schema 不支援或 extraction 無法完成時必須 `NEEDS_REVIEW`，不得 fallback 到 historical `Full Plan Match=TRUE`。只有 Active Batch ID 空白的 legacy mode 才保留原本 selection 與 fallback。
 
-同 Branch 的歷史覆核列不得遮蔽 structured intent。任一列只要 Version 或 JSON 任一存在，index 必須選用 structured-intent row；沒有完整 active structured row 時仍須 `NEEDS_REVIEW`。Document Match writer 真正寫入前必須以最新 Sheet snapshot 重新確認 target Branch 恰好只有 target row 是 Version `1` 且 JSON 非空的完整 active structured row；若 indexing 後新增第二筆 active row，必須 zero writes 並 fail closed。
+Active Batch identity 必須同時用於 evidence index 與 Document Match writer。Index 缺少 current-batch Branch row或遇到 duplicate 時 fail closed並列出 rows；其他 batch 的舊 structured rows不得造成 conflict。Writer 真正寫入前以最新 Sheet snapshot 驗證 target row 的 Branch ID、Review Batch ID、current-batch 唯一性、Version 與 JSON snapshot；任一變更均 zero writes。Active Batch ID 空白時才沿用原本 legacy structured-intent／writer 行為。
 
 Schema 的 `evidence_set.state=Confirmed`、`complete=true` 必須代表已完成該 Branch relevant evidence set 盤點，並在 `relevant_source_ids` 列出全部 relevant files。Folder 不要求每一檔案建立 product rows，但只讀單一 PDF 不等於 evidence set complete；無法判定完整時使用 `Ambiguous`，Branch 不得 Ready。每個 product 的 `source_id` 必須屬於 relevant source IDs。
 

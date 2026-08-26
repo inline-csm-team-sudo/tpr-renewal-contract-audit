@@ -129,8 +129,8 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 ### 5.1 Structured document comparison
 
 - Structured extraction 的唯一操作規格為 [`structured-extraction.md`](structured-extraction.md)。任何 reader、extraction-only shadow test 或局部 visual fallback 都必須先完整讀取該文件；不得以 Queue 方案值提示 reader，文件事實凍結後才可交由 Apps Script 比較。
-- `setupAuditSheets_` 為新建立的 Contract Evidence Review row 自動填入 `Structured Review Version=1`；既有覆核列只有在 Version 與 `Structured Contract Data` 都空白時，才可沿用既有 `Full Plan Match`。任一欄有值即進入 structured mode；此時 JSON 缺失、格式錯誤或 schema 不支援，一律 `NEEDS_REVIEW`，不得回退至人工 TRUE。
-- 同 Branch 的歷史覆核列不得遮蔽 structured intent。任一列只要 Version 或 JSON 任一有值，index 必須選用 structured-intent row；沒有完整 active structured row 時仍須進入 structured mode 並回傳 `NEEDS_REVIEW`，不可改讀較早的 legacy `Full Plan Match`。
+- `Control!Active Contract Review Batch ID` 有值時，`Contract Evidence Review` 只以 `Review Batch ID` 完全相同的 current-batch rows 作為本次 evidence identity。每個 Queue Branch 在 current batch 必須恰好一列；缺列或同 Branch 多列均 fail closed，duplicate error 必須列出實際 row numbers。blank batch、其他 batch 與舊 structured rows 全部是 historical，不參與 current-batch uniqueness，也不得被選取或寫入。
+- Current-batch row 本身即代表 structured intent。只有 Version `1` 且 `Structured Contract Data` 非空時才執行 structured comparison；Version 或 JSON 任一缺失、格式錯誤或 schema 不支援，一律 `NEEDS_REVIEW`，不得改讀 historical `Full Plan Match=TRUE`。只有 `Active Contract Review Batch ID` 空白的 legacy mode 才保留原本 selection 與 `Full Plan Match` fallback；在該 mode 中，任一列的 Version 或 JSON 有值仍依既有 structured-intent fail-safe 處理。
 - 目前 schema version 為 `1`。`Structured Contract Data` 是 provider-neutral extraction input；Gemini 是優先 reader，但未來其他 PDF、image 或 scanned-file reader 只要輸出相同 schema 即可。Reader 不得輸出權威的 MATCH／MISMATCH。
 - Apps Script 是 `Document Match Result` 與 `Document Match Detail` 的唯一計算與寫入者。Reader 或 skill 只能寫文件事實、field state、source IDs 與 evidence-set 完整性。
 - `evidence_set.state=Confirmed`、`complete=true` 必須代表已盤點該 Branch 的完整 relevant evidence set，並在 `relevant_source_ids` 列出 relevant files。只讀一份 PDF 不足以證明資料夾案件已完整；無法確認完整性時使用 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
@@ -144,7 +144,7 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - 固定費 `Deposit` 的文件價格只有 `state=Confirmed` 才能套用 `monthly → annual ×12`。明確的 `Confirmed 0` 與 Queue `annual 0` 視為相同固定費；`NotMentioned`、`Unreadable`、`Ambiguous` 不得經空值或數值 coercion 當成 0，其中 `Unreadable`／`Ambiguous` 必須 `NEEDS_REVIEW`。此等價不適用於 `Deposit-Commission` 或其他產品。
 - Structured mode 完全不讀 `Full Plan Match` 作為 manual veto；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可以否決 Apps Script 計算出的 MATCH。blank、checkbox 預設的 boolean `false` 與其他 token 都不構成 veto。Structured data 不存在的 legacy review 才維持原本 `Full Plan Match` 行為。
 - `Contract Evidence Review` migration 必須依完整 header name 定位。既有 header reuse，缺少的新 header append 到最右側，舊版額外欄保留；不得刪除、重新排序或覆蓋。必要 header duplicate 或無法唯一 mapping 時必須在任何 Sheet write 前 fail closed。
-- Document Match writer 必須以實際 `targetRowNumber` 寫入，且在真正寫入前用最新 Sheet snapshot 重新確認每個 target Branch 恰好只有該 row 是 Version `1` 且 JSON 非空的完整 active structured row。若 indexing 後新增第二筆 active row、target identity 改變或唯一性無法確認，必須 zero writes 並 fail closed。
+- Document Match writer 必須以 index 傳遞的實際 `targetRowNumber`、`Review Batch ID`、Version 與 JSON snapshot 寫入。Active Batch mode 下，真正寫入前須重新讀最新 Sheet snapshot，確認 target row 的 Branch ID／Batch ID 未變、它仍是該 Branch 在 current batch 的唯一 row、Version `1` 與 JSON 非空且都和 indexing snapshot 一致。任一 identity／內容改變或 current-batch duplicate 必須 zero writes 並 fail closed；其他 batch／blank-batch historical rows不得造成 conflict，也不得被寫入。Legacy mode 維持原本「唯一完整 structured row」writer preflight。
 
 ## 6. 原方案續約與方案變更
 

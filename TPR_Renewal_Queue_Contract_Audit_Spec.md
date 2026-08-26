@@ -265,9 +265,9 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 
 僅有 Queue 的合約連結不代表已完成檢查。若覆核表只有連結、沒有覆核結果，應顯示為待覆核。
 
-新版 structured review 使用 `Structured Review Version=1`，新建立的 Contract Evidence Review row 由程式自動填入此版本。只要 Version 或 `Structured Contract Data` 任一有值，即進入 structured mode；JSON 缺失、無效、schema 不支援或 extraction 無法完成，必須 `NEEDS_REVIEW`，不得靜默沿用 `Full Plan Match=TRUE`。只有兩欄都空白的既有 legacy review 才保留舊 fallback。
+新版 structured review 使用 `Structured Review Version=1`。`Control!Active Contract Review Batch ID` 有值時，只讀取 `Review Batch ID` 相同的 current-batch rows；每個 Queue Branch 必須恰好一列，缺列或重複列均 fail closed，其他／blank batch rows 一律是 historical。Current-batch row 本身即代表 structured intent；Version 或 `Structured Contract Data` 任一缺失、JSON 無效、schema 不支援或 extraction 無法完成，必須 `NEEDS_REVIEW`，不得靜默沿用 historical `Full Plan Match=TRUE`。只有 Active Batch ID 空白的 legacy mode 才保留原本 selection／fallback。
 
-同 Branch 的歷史覆核列不得遮蔽 structured intent。任一列只要 Version 或 JSON 任一有值，index 必須選用 structured-intent row；沒有完整 active structured row 時仍須 `NEEDS_REVIEW`，不可回讀較早的 legacy `Full Plan Match`。
+Active Batch mode 的 structured intent 只由 current-batch row 決定；其他 batch／blank-batch historical rows不得遮蔽、補足或與 current row 形成 duplicate。Active Batch ID 空白的 legacy mode 才在原本 eligible rows 中套用既有 structured-intent 規則：任一列只要 Version 或 JSON 任一有值即不得回讀較早的 legacy `Full Plan Match`。
 
 `Structured Contract Data` 只記錄 reader 從文件擷取的事實，schema 不綁定 Gemini。Gemini、其他 PDF reader 或 image/scanned-file reader 均輸出相同 schema；`Document Match Result` 與 `Document Match Detail` 只能由 Apps Script 計算並寫入，reader／skill 不得直接填入 MATCH／MISMATCH 作為 authority。
 
@@ -275,7 +275,7 @@ Structured mode 不使用 `Full Plan Match`。人工否決只讀 `Manual Plan Ve
 
 `Contract Evidence Review` 的 schema migration 全部依 header name 執行：既有欄 reuse，缺少的新版欄 append 到最右側，舊版額外欄保留且不重新排序。新增 review row 依 Sheet 實際 headers／column count 建立，只填 Branch ID、Evidence URL 與 `Structured Review Version=1`。必要 header duplicate 或 mapping 不明確時，在任何 write 前 fail closed；Document Match Result／Detail 也只能依 header name 定位寫入。
 
-Document Match writer 只能依實際 `targetRowNumber` 寫入。真正寫入前必須以最新 Sheet snapshot 重新確認每個 target Branch 恰好只有該 row 是 Version `1` 且 JSON 非空的完整 active structured row；若 indexing 後新增第二筆 active row或 identity 改變，必須 zero writes 並 fail closed。
+Document Match writer 只能依 index 傳遞的 `targetRowNumber`、Review Batch ID、Version 與 JSON snapshot 寫入。Active Batch mode 下，真正寫入前必須以最新 Sheet snapshot 重新確認 target Branch／Batch identity、current-batch row 唯一性，以及 Version／JSON 與 indexing snapshot 完全一致；任一改變均 zero writes 並 fail closed。其他 batch／blank-batch historical rows不參與 current uniqueness，亦不得被更新。Active Batch ID 空白時才沿用原本 legacy writer preflight。
 
 Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
 

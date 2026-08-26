@@ -642,10 +642,11 @@ assert.deepStrictEqual(Array.from(headerWrite.values[0]), [
 // Evidence row identity and writer targeting are row-specific, not Branch-only.
 const traceHeaders = [
   'Old Extra', 'Document Match Detail', 'Structured Contract Data', 'Branch ID',
-  'Document Match Result', 'Structured Review Version', 'Full Plan Match'
+  'Document Match Result', 'Structured Review Version', 'Full Plan Match', 'Review Batch ID'
 ];
-function evidenceRow(branchId, version, json, result = '', detail = '', fullPlanMatch = false) {
-  return ['keep', detail, json, branchId, result, version, fullPlanMatch];
+function evidenceRow(branchId, version, json, result = '', detail = '', fullPlanMatch = false,
+  reviewBatchId = '') {
+  return ['keep', detail, json, branchId, result, version, fullPlanMatch, reviewBatchId];
 }
 function evidenceSheet(rows) {
   const values = [traceHeaders].concat(rows.map(row => row.slice()));
@@ -669,6 +670,9 @@ function traceFor(entry, result = 'MATCH', detail = 'calculated detail') {
   return [{
     branchId:entry.review['Branch ID'],
     targetRowNumber:entry.targetRowNumber,
+    reviewBatchId:entry.reviewBatchId,
+    expectedStructuredReviewVersion:entry.review['Structured Review Version'],
+    expectedStructuredContractData:entry.review['Structured Contract Data'],
     result,
     detail
   }];
@@ -801,6 +805,126 @@ evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1']);
 assert.strictEqual(evidenceIndex.B1.rowNumber, 2);
 assert.strictEqual(evidenceIndex.B1.targetRowNumber, null);
 api.writeDocumentMatchTraces_(traceSheet, []);
+assert.strictEqual(traceSheet.writes.length, 0);
+
+// Active Batch identity scopes structured selection to the current review batch only.
+const activeBatchId = 'REVIEW-CURRENT';
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', true, ''),
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId),
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, 'REVIEW-OLD')
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId);
+assert.strictEqual(evidenceIndex.B1.rowNumber, 3);
+assert.strictEqual(evidenceIndex.B1.targetRowNumber, 3);
+assert.strictEqual(evidenceIndex.B1.reviewBatchId, activeBatchId);
+assert.strictEqual(evidenceIndex.B1.currentBatchMode, true);
+api.writeDocumentMatchTraces_(traceSheet, traceFor(evidenceIndex.B1), activeBatchId);
+assert.deepStrictEqual(writtenRows(traceSheet), [3]);
+[2, 4].forEach(rowNumber => {
+  assert.strictEqual(traceSheet.values[rowNumber - 1][4], '');
+  assert.strictEqual(traceSheet.values[rowNumber - 1][1], '');
+});
+
+// A current-batch row with either Version or JSON missing remains structured intent.
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '', '', '', '', true, ''),
+  evidenceRow('B1', '1', '', '', '', false, activeBatchId)
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId);
+assert.strictEqual(evidenceIndex.B1.rowNumber, 3);
+assert.strictEqual(evidenceIndex.B1.targetRowNumber, null);
+assert.strictEqual(evidenceIndex.B1.structuredIntent, true);
+incompleteResult = api.structuredDocumentMatchAudit_(evidenceIndex.B1.review, [
+  { values:queueRow() }
+], qx);
+assert.strictEqual(incompleteResult.result, 'NEEDS_REVIEW');
+assert.match(incompleteResult.reason, /Structured Contract Data.*缺失/);
+
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '', '', '', '', true, ''),
+  evidenceRow('B1', '', '{"schema_version":1}', '', '', false, activeBatchId)
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId);
+assert.strictEqual(evidenceIndex.B1.rowNumber, 3);
+assert.strictEqual(evidenceIndex.B1.targetRowNumber, null);
+incompleteResult = api.structuredDocumentMatchAudit_(evidenceIndex.B1.review, [
+  { values:queueRow() }
+], qx);
+assert.strictEqual(incompleteResult.result, 'NEEDS_REVIEW');
+assert.match(incompleteResult.reason, /Version.*必須為 1/);
+
+// Current-batch duplicate or missing Branch identity fails closed before any write.
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId),
+  evidenceRow('B1', '', '', '', '', false, activeBatchId),
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, 'REVIEW-OLD')
+]);
+assert.throws(
+  () => api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId),
+  /REVIEW-CURRENT.*B1 rows 2, 3/
+);
+assert.strictEqual(traceSheet.writes.length, 0);
+
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId),
+  evidenceRow('B2', '1', '{"schema_version":1}', '', '', false, 'REVIEW-OLD')
+]);
+assert.throws(
+  () => api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1', 'B2'], activeBatchId),
+  /REVIEW-CURRENT.*缺少 Branch rows.*B2/
+);
+assert.strictEqual(traceSheet.writes.length, 0);
+
+// Active Batch blank keeps the exact legacy selection behavior.
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '', '', '', '', true, 'REVIEW-OLD'),
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, 'REVIEW-CURRENT')
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], '');
+assert.strictEqual(evidenceIndex.B1.rowNumber, 3);
+assert.strictEqual(evidenceIndex.B1.targetRowNumber, 3);
+assert.strictEqual(evidenceIndex.B1.currentBatchMode, false);
+
+// Writer latest-snapshot preflight fails atomically if current-batch identity changes.
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId),
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, 'REVIEW-OLD')
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId);
+const activeBatchTrace = traceFor(evidenceIndex.B1);
+traceSheet.values[1][7] = 'REVIEW-CHANGED';
+assert.throws(
+  () => api.writeDocumentMatchTraces_(traceSheet, activeBatchTrace, activeBatchId),
+  /preflight.*Review Batch ID|Review Batch ID.*preflight/i
+);
+assert.strictEqual(traceSheet.writes.length, 0);
+
+// A second current-batch row added after indexing conflicts; another-batch row never does.
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId),
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, 'REVIEW-OLD')
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId);
+const currentBatchTrace = traceFor(evidenceIndex.B1);
+traceSheet.values.push(evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId));
+assert.throws(
+  () => api.writeDocumentMatchTraces_(traceSheet, currentBatchTrace, activeBatchId),
+  /最新 Sheet snapshot.*REVIEW-CURRENT.*rows.*2, 4/
+);
+assert.strictEqual(traceSheet.writes.length, 0);
+
+// A nonblank JSON replacement after indexing is also rejected as stale state.
+traceSheet = evidenceSheet([
+  evidenceRow('B1', '1', '{"schema_version":1}', '', '', false, activeBatchId)
+]);
+evidenceIndex = api.indexedEvidenceReviews_(traceSheet, 'Branch ID', ['B1'], activeBatchId);
+const staleJsonTrace = traceFor(evidenceIndex.B1);
+traceSheet.values[1][2] = '{"schema_version":1,"changed":true}';
+assert.throws(
+  () => api.writeDocumentMatchTraces_(traceSheet, staleJsonTrace, activeBatchId),
+  /Structured Contract Data.*indexing snapshot/
+);
 assert.strictEqual(traceSheet.writes.length, 0);
 
 console.log('Structured document comparison regression: all cases passed.');

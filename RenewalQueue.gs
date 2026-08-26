@@ -1538,7 +1538,10 @@ function normalizeStructuredDocumentProducts_(data) {
         type:spec[2], notMentionedAsZero:spec[0] === 'bonus_sets' && isMainProduct_(product)
       });
       if (field.error) errors.push(field.error);
-      else values[spec[1]] = field.value;
+      else {
+        values[spec[1]] = field.value;
+        if (spec[0] === 'price') values.priceState = structuredState_(row.price.state);
+      }
     });
 
     if (product === 'Deposit' || product === 'Deposit-Commission') {
@@ -1765,13 +1768,17 @@ function structuredDocumentLineEqual_(documentLine, queueLine, allowAnnualizatio
 function structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnualization) {
   const adjusted = Object.assign({}, documentLine);
   const monthlyPrice = Number(documentLine.price);
+  const product = queueLine.product || documentLine.product;
+  const positiveAddOnPrice = monthlyPrice > 0;
+  const confirmedZeroDepositPrice = product === 'Deposit' && monthlyPrice === 0 &&
+    documentLine.priceState === 'confirmed';
   if (allowAnnualization && !isMainProduct_(queueLine.product) &&
       documentLine.billing === 'monthly' && queueLine.billing === 'annual' &&
-      documentLine.price !== '' && isFinite(monthlyPrice) && monthlyPrice > 0) {
+      documentLine.price !== '' && isFinite(monthlyPrice) &&
+      (positiveAddOnPrice || confirmedZeroDepositPrice)) {
     adjusted.billing = 'annual';
     adjusted.price = String(monthlyPrice * 12);
   }
-  const product = queueLine.product || documentLine.product;
   // Deposit-Commission is a per-transaction rate, not a recurring charge.
   // Its document billing_period is therefore NotApplicable and must not be
   // inferred from the main product or compared with Queue's inherited period.

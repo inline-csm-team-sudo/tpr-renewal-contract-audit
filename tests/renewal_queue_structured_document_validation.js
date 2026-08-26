@@ -312,6 +312,42 @@ data = structuredData([travelRsv, travelDeposit, travelCommission()]);
 result = match(data, travelQueue);
 assert.strictEqual(result.result, 'MATCH');
 
+// Fixed-fee Deposit monthly -> annual normalization requires an explicit
+// Confirmed document price. Explicit zero is a real price, while missing or
+// unreadable states must never be coerced to zero.
+const zeroDepositQueue = [
+  queueRow(),
+  queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:'', price:0,
+    overageMethod:'B2C', overagePrice:5 })
+];
+function monthlyDepositWithPrice(priceField) {
+  return product({
+    product:field('Confirmed', 'Deposit'),
+    billing_period:field('Confirmed', 'monthly'),
+    usage_sets:field('NotApplicable'),
+    bonus_sets:field('NotApplicable'),
+    price:priceField,
+    share_plan_id:field('NotApplicable'),
+    deposit_type:field('Confirmed', 'B2C'),
+    setup_fee:field('Confirmed', 5)
+  });
+}
+
+data = structuredData([travelRsv, monthlyDepositWithPrice(field('Confirmed', 1500))]);
+assert.strictEqual(match(data, [travelQueue[0], travelQueue[1]]).result, 'MATCH');
+
+data = structuredData([product(), monthlyDepositWithPrice(field('Confirmed', 0))]);
+assert.strictEqual(match(data, zeroDepositQueue).result, 'MATCH');
+
+data = structuredData([product(), monthlyDepositWithPrice(field('NotMentioned'))]);
+assert.notStrictEqual(match(data, zeroDepositQueue).result, 'MATCH');
+
+data = structuredData([product(), monthlyDepositWithPrice(field('Unreadable'))]);
+assert.strictEqual(match(data, zeroDepositQueue).result, 'NEEDS_REVIEW');
+
+data = structuredData([product(), monthlyDepositWithPrice(field('Ambiguous'))]);
+assert.strictEqual(match(data, zeroDepositQueue).result, 'NEEDS_REVIEW');
+
 data = structuredData([
   travelRsv, travelDeposit, travelCommission({ buy_in_price:field('Confirmed', 94) })
 ]);

@@ -1,9 +1,18 @@
 /**
- * Test-only Renewal DB -> TPR Queue converter.
- * This project is intentionally locked to the test workbook. It never writes
- * to the original TPR spreadsheet.
+ * Renewal DB -> TPR Queue converter.
+ *
+ * Test and Production use the same business logic, but every cloud project
+ * must declare its identity through Script Properties.  The validated Test
+ * workbook ID remains only as a production-safety sentinel and as the
+ * one-time Deposit golden-fixture source; it is never a writable runtime
+ * target in Production.
  */
-const RENEWAL_QUEUE_TEST_WORKBOOK_ID = '1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4';
+const RENEWAL_QUEUE_VALIDATED_TEST_WORKBOOK_ID = '1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4';
+const RENEWAL_QUEUE_ENVIRONMENT_KEYS = [
+  'ENVIRONMENT', 'TARGET_WORKBOOK_ID', 'EXPECTED_WORKBOOK_NAME',
+  'ORIGINAL_TPR_SPREADSHEET_ID', 'RENEWAL_DB_SPREADSHEET_ID',
+  'RSV_PLAN_REFERENCE_SPREADSHEET_ID', 'DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID'
+];
 const QUEUE_LEADING_HEADERS = ['', 'Check', 'Note', 'Demand', 'Comment', '合約'];
 const QUEUE_HELPER_HEADERS = ['Batch ID', 'Original TPR Row', 'Renewal DB Row', 'Transformation Status'];
 const QUEUE_AUDIT_HEADERS = [
@@ -55,8 +64,14 @@ const PLAN_ORIGIN_SETTINGS = [
   ['RSV Plan Reference Spreadsheet ID', '10ECF2b0yu6loRZqDl_4ynHOuc2yz-IAUjPirCj-dxvM', 'RSV／RwG 方案來源；只允許程式維護 Plan Code 欄。'],
   ['RSV Plan Reference Tab', 'TMS 方案', 'RSV／RwG 方案來源分頁。'],
   ['RSV Plan Code Header', 'Plan Code', '方案來源的永久代碼欄；既有代碼不得改寫。'],
+  ['Deposit Plan Reference Tab', '訂金方案', 'Deposit 方案來源分頁；正常 Queue／Audit 流程唯讀。'],
   ['Legacy Branch Master Tab', 'Legacy Branch Master', 'Legacy cohort 主檔；正常流程不得重新掃描 Raw : TPR。'],
   ['Legacy Branch ID Header', 'Branch ID', 'Legacy Branch Master 的 Branch ID 欄位標題。']
+];
+const PLAN_REFERENCE_SNAPSHOT_HEADERS = [
+  'Snapshot ID', 'Plan Family', 'Source Spreadsheet ID', 'Source Tab',
+  'Source Row', 'Imported At', 'Raw Values JSON', 'Normalized Combination ID',
+  'Special Plan Flag'
 ];
 const CANONICAL_PLAN_HEADERS = [
   'Plan Code', 'Version', 'Status', 'Plan Family', 'Source Catalog',
@@ -77,10 +92,81 @@ const PLAN_REFERENCE_MAPPING_HEADERS = [
   'Status', 'Notes'
 ];
 
+function renewalEnvironmentConfig_() {
+  if (typeof PropertiesService === 'undefined' || !PropertiesService.getScriptProperties) {
+    throw new Error('Renewal environment Script Properties are unavailable. Zero writes performed.');
+  }
+  const properties = PropertiesService.getScriptProperties().getProperties();
+  const missing = RENEWAL_QUEUE_ENVIRONMENT_KEYS.filter(key => !auditText_(properties[key]));
+  if (missing.length) {
+    throw new Error('Renewal environment Script Properties are incomplete: ' + missing.join(', ') +
+      '. Zero writes performed.');
+  }
+  const environment = auditText_(properties.ENVIRONMENT).toLowerCase();
+  if (environment !== 'test' && environment !== 'production') {
+    throw new Error('ENVIRONMENT must be test or production; received ' + properties.ENVIRONMENT +
+      '. Zero writes performed.');
+  }
+  const targetWorkbookId = auditText_(properties.TARGET_WORKBOOK_ID);
+  if (environment === 'production' && targetWorkbookId === RENEWAL_QUEUE_VALIDATED_TEST_WORKBOOK_ID) {
+    throw new Error('Production TARGET_WORKBOOK_ID points to the validated Test workbook. Zero writes performed.');
+  }
+  if (environment === 'test' && targetWorkbookId !== RENEWAL_QUEUE_VALIDATED_TEST_WORKBOOK_ID) {
+    throw new Error('Test TARGET_WORKBOOK_ID does not match the validated Test workbook. Zero writes performed.');
+  }
+  return {
+    environment,
+    targetWorkbookId,
+    expectedWorkbookName:auditText_(properties.EXPECTED_WORKBOOK_NAME),
+    originalTprSpreadsheetId:auditText_(properties.ORIGINAL_TPR_SPREADSHEET_ID),
+    renewalDbSpreadsheetId:auditText_(properties.RENEWAL_DB_SPREADSHEET_ID),
+    rsvPlanReferenceSpreadsheetId:auditText_(properties.RSV_PLAN_REFERENCE_SPREADSHEET_ID),
+    depositPlanReferenceSpreadsheetId:auditText_(properties.DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID)
+  };
+}
+
+function openConfiguredRenewalWorkbook_() {
+  const config = renewalEnvironmentConfig_();
+  const ss = SpreadsheetApp.openById(config.targetWorkbookId);
+  const actualId = auditText_(ss.getId());
+  const actualName = auditText_(ss.getName());
+  if (actualId !== config.targetWorkbookId || actualName !== config.expectedWorkbookName) {
+    throw new Error('Renewal target identity mismatch: expected ' + config.expectedWorkbookName +
+      ' (' + config.targetWorkbookId + '), received ' + actualName + ' (' + actualId +
+      '). Zero writes performed.');
+  }
+  return { ss, config };
+}
+
+function assertConfiguredSourceIds_(runtime, control) {
+  const checks = [
+    ['Original TPR Spreadsheet ID', runtime.config.originalTprSpreadsheetId],
+    ['Renewal DB Spreadsheet ID', runtime.config.renewalDbSpreadsheetId],
+    ['RSV Plan Reference Spreadsheet ID', runtime.config.rsvPlanReferenceSpreadsheetId],
+    ['Plan Reference Spreadsheet ID', runtime.config.depositPlanReferenceSpreadsheetId]
+  ];
+  const errors = checks.filter(item => auditText_(control[item[0]]) !== item[1])
+    .map(item => item[0] + '：Control=' + (auditText_(control[item[0]]) || '空白') +
+      '、Script Properties=' + item[1]);
+  const sourceIds = checks.map(item => item[1]);
+  if (sourceIds.some(id => id === runtime.config.targetWorkbookId)) {
+    errors.push('TARGET_WORKBOOK_ID 不得等於任何正式 source ID');
+  }
+  if (new Set(sourceIds).size !== sourceIds.length) {
+    errors.push('正式 source IDs 必須彼此唯一');
+  }
+  if (errors.length) {
+    throw new Error('Renewal source identity preflight failed: ' + errors.join('；') +
+      '. Zero writes performed.');
+  }
+}
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Renewal Queue')
+    .addItem('Build Queue Dry Run', 'buildQueueDryRun')
     .addItem('Build Queue', 'buildQueue')
+    .addItem('Prepare Contract Review Batch', 'prepareContractReviewBatch')
     .addItem('Sync Plan Catalog', 'syncPlanCatalog')
     .addItem('Maintain Plan Codes', 'maintainPlanCodes')
     .addItem('Run Contract Audit', 'runContractAudit')
@@ -88,24 +174,45 @@ function onOpen() {
     .addToUi();
 }
 
-// Run once from Apps Script to show the Renewal Queue menu in the test workbook.
-function installTestWorkbookMenu() {
+// Run once from Apps Script to show the Renewal Queue menu in the configured workbook.
+function installWorkbookMenu() {
+  const runtime = openConfiguredRenewalWorkbook_();
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'onOpen')
     .forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('onOpen')
-    .forSpreadsheet(RENEWAL_QUEUE_TEST_WORKBOOK_ID)
+    .forSpreadsheet(runtime.ss)
     .onOpen()
     .create();
 }
 
+function installTestWorkbookMenu() {
+  return installWorkbookMenu();
+}
+
 function buildQueue() {
-  const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+  return buildQueueWithMode_(false);
+}
+
+function buildQueueDryRun() {
+  return buildQueueWithMode_(true);
+}
+
+function buildQueueWithMode_(dryRun) {
+  const runtime = openConfiguredRenewalWorkbook_();
+  const ss = runtime.ss;
   const queueTimeZone = ss.getSpreadsheetTimeZone();
   const controlSheet = ss.getSheetByName('Control');
-  ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
-  const control = readSettings_(controlSheet);
-  syncPlanCatalog_(ss, control);
+  let control = readSettings_(controlSheet);
+  assertConfiguredSourceIds_(runtime, control);
+  if (dryRun) {
+    validatePlanReferenceSourcesReadOnly_(ss, control);
+  } else {
+    ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
+    control = readSettings_(controlSheet);
+    assertConfiguredSourceIds_(runtime, control);
+    syncPlanCatalog_(ss, control);
+  }
   const manualIds = String(control['Selected Branch IDs'] || '')
     .split(/[\n,\s]+/).map(String).map(s => s.trim()).filter(Boolean);
   const selectionMode = String(control['Selection Mode'] || 'TPR Check Box = TRUE');
@@ -207,10 +314,29 @@ function buildQueue() {
     .filter(x => !renewalByMonth[x.renewalMonth].byBranch[String(x.values[branchCol]).trim()])
     .map(x => x.renewalMonth + ':' + String(x.values[branchCol]).trim()))];
   if (!output.length) {
+    if (dryRun) {
+      return {
+        dryRun:true, branchCount:ids.length, productRowCount:0, renewalMonths:months,
+        sourceRows:sourceRows.map(item => item.row), missingTpr, missingRenewal
+      };
+    }
     appendAudit_(ss.getSheetByName('Audit Log'), batchId, monthLabel, 0, missingTpr, missingRenewal);
     notify_('No Queue rows were built. The existing Queue was kept unchanged.\n' +
       'Check that selected TPR rows have a matching Renewal DB row.');
     return;
+  }
+  if (dryRun) {
+    const result = {
+      dryRun:true,
+      branchCount:ids.length,
+      productRowCount:output.length,
+      renewalMonths:months,
+      sourceRows:sourceRows.map(item => item.row),
+      missingTpr,
+      missingRenewal
+    };
+    console.log(JSON.stringify(result));
+    return result;
   }
   writeQueue_(queue, queueHeaders, output, queueIndex);
   setupAuditSheets_(ss, queue);
@@ -223,17 +349,23 @@ function buildQueue() {
 }
 
 function validateConfiguration() {
-  const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+  const runtime = openConfiguredRenewalWorkbook_();
+  const ss = runtime.ss;
+  assertConfiguredSourceIds_(runtime, readSettings_(ss.getSheetByName('Control')));
   const maps = readTable_(ss.getSheetByName('Field Mapping')).filter(r => isActive_(r['Active']));
   const duplicates = maps.filter((r, i, all) => all.findIndex(x => x['Mapping Key'] === r['Mapping Key']) !== i);
   notify_(duplicates.length ? 'Duplicate Mapping Key: ' + duplicates.map(r => r['Mapping Key']).join(', ') : 'Configuration looks structurally valid.');
 }
 
 function syncPlanCatalog() {
-  const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+  const runtime = openConfiguredRenewalWorkbook_();
+  const ss = runtime.ss;
   const controlSheet = ss.getSheetByName('Control');
+  assertConfiguredSourceIds_(runtime, readSettings_(controlSheet));
   ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
-  const result = syncPlanCatalog_(ss, readSettings_(controlSheet));
+  const control = readSettings_(controlSheet);
+  assertConfiguredSourceIds_(runtime, control);
+  const result = syncPlanCatalog_(ss, control);
   notify_('Plan catalog synced. Active plans: ' + result.activePlans.length +
     '; pending changes: ' + result.pendingChanges.length + '.');
 }
@@ -242,8 +374,10 @@ function maintainPlanCodes() {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+    const runtime = openConfiguredRenewalWorkbook_();
+    const ss = runtime.ss;
     const control = readSettings_(ss.getSheetByName('Control'));
+    assertConfiguredSourceIds_(runtime, control);
     const sourceSpreadsheetId = auditText_(control['RSV Plan Reference Spreadsheet ID']);
     const sourceTab = auditText_(control['RSV Plan Reference Tab']);
     const codeHeader = auditText_(control['RSV Plan Code Header']) || 'Plan Code';
@@ -347,7 +481,7 @@ function writeQueue_(sheet, headers, rows, ix) {
 }
 
 function appendAudit_(sheet, batchId, month, count, missingTpr, missingRenewal, operation) {
-  sheet.appendRow([new Date(), batchId, month, operation || 'Build Queue', count, missingTpr.join(', '), missingRenewal.join(', '), 'Test only; no formal TPR writeback']);
+  sheet.appendRow([new Date(), batchId, month, operation || 'Build Queue', count, missingTpr.join(', '), missingRenewal.join(', '), 'Audit workbook only; no formal source writeback']);
 }
 // Alerts pause a script until a person closes the dialog.  That is unsuitable
 // for the full Queue/audit run, because it can make an otherwise completed
@@ -450,14 +584,17 @@ function requiredMapping_(map, key) { if (map[key] === undefined) throw new Erro
  * OCR or an unreadable PDF must never be silently counted as proof.
  */
 function runContractAudit() {
-  const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+  const runtime = openConfiguredRenewalWorkbook_();
+  const ss = runtime.ss;
+  const controlSheet = ss.getSheetByName('Control');
+  let control = readSettings_(controlSheet);
+  assertConfiguredSourceIds_(runtime, control);
+  ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
+  control = readSettings_(controlSheet);
+  assertConfiguredSourceIds_(runtime, control);
   const queue = ss.getSheetByName('TPR Update Queue');
   if (!queue || queue.getLastRow() < 2) throw new Error('TPR Update Queue has no data. Build Queue first.');
   setupAuditSheets_(ss, queue);
-
-  const controlSheet = ss.getSheetByName('Control');
-  ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
-  const control = readSettings_(controlSheet);
   const catalogSync = syncPlanCatalog_(ss, control);
   const queueValues = queue.getDataRange().getValues();
   const queueHeaders = queueValues[0].map(String);
@@ -605,24 +742,132 @@ function runContractAudit() {
 }
 
 function setupAuditSheets_(ss, queue) {
-  const evidenceSheet = ensureReviewSheetHeadersByName_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS);
-  ensureReviewSheet_(ss, 'Plan Classification Review', PLAN_REVIEW_HEADERS);
+  ensureReviewSheetHeadersByName_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS.concat(['Review Batch ID']));
+  ensureReviewSheetHeadersByName_(ss, 'Plan Classification Review', PLAN_REVIEW_HEADERS.concat(['Review Batch ID']));
   ensureReviewSheet_(ss, 'Special Approval Review', SPECIAL_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Share Group Review', SHARE_REVIEW_HEADERS);
-  const values = queue.getDataRange().getValues();
-  if (values.length < 2) return;
-  const ix = headerIndex_(values[0].map(String));
-  const branches = {};
-  values.slice(1).forEach(r => {
-    const id = auditText_(auditGet_(r, ix, 'Branch ID'));
-    if (!id) return;
-    if (!branches[id]) branches[id] = auditText_(auditGet_(r, ix, '合約'));
+}
+
+function prepareContractReviewBatch() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const runtime = openConfiguredRenewalWorkbook_();
+    const ss = runtime.ss;
+    const controlSheet = ss.getSheetByName('Control');
+    const control = readSettings_(controlSheet);
+    assertConfiguredSourceIds_(runtime, control);
+    if (auditText_(control['Active Contract Review Batch ID'])) {
+      throw new Error('Active Contract Review Batch ID 已有值；不得覆蓋既有 active batch。');
+    }
+    const queue = ss.getSheetByName('TPR Update Queue');
+    if (!queue || queue.getLastRow() < 2) throw new Error('TPR Update Queue has no data. Build Queue first.');
+    setupAuditSheets_(ss, queue);
+    const queueValues = queue.getDataRange().getValues();
+    const qx = headerIndex_(queueValues[0].map(String));
+    const branchColumn = requiredHeader_(qx, 'Branch ID', 'Queue');
+    const evidenceColumn = requiredHeader_(qx, '合約', 'Queue');
+    const shareColumn = findHeader_(qx, 'Share Plan ID');
+    const branches = {};
+    queueValues.slice(1).forEach(row => {
+      const branchId = auditText_(row[branchColumn]);
+      if (!branchId) return;
+      const evidenceUrl = auditText_(row[evidenceColumn]);
+      if (branches[branchId] !== undefined && branches[branchId] !== evidenceUrl) {
+        throw new Error('Queue Branch ' + branchId + ' 有不同 Evidence URL，無法建立唯一 review identity。');
+      }
+      branches[branchId] = evidenceUrl;
+    });
+    const branchIds = Object.keys(branches);
+    if (!branchIds.length) throw new Error('Queue has no Branch IDs.');
+    const prefix = runtime.config.environment === 'production' ? 'REVIEW-PROD-' : 'REVIEW-';
+    const batchId = prefix + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyyMMdd-HHmmss');
+    const evidenceSheet = ss.getSheetByName('Contract Evidence Review');
+    const planSheet = ss.getSheetByName('Plan Classification Review');
+    appendCurrentBatchRows_(evidenceSheet, branchIds, batchId, branchId => ({
+      'Branch ID':branchId,
+      'Evidence URL':branches[branchId],
+      'Review Batch ID':batchId,
+      'Structured Review Version':'1'
+    }));
+    appendCurrentBatchRows_(planSheet, branchIds, batchId, branchId => ({
+      'Branch ID':branchId,
+      'Review Batch ID':batchId
+    }));
+    appendMissingReviewRows_(ss.getSheetByName('Special Approval Review'), branchIds, id => [id]);
+    const shareIds = shareColumn === null ? [] : [...new Set(queueValues.slice(1)
+      .map(row => auditText_(row[shareColumn])).filter(Boolean))];
+    appendMissingReviewRows_(ss.getSheetByName('Share Group Review'), shareIds, id => [id]);
+    assertCurrentBatchRows_(evidenceSheet, branchIds, batchId);
+    assertCurrentBatchRows_(planSheet, branchIds, batchId);
+    setControlSettingsAtomically_(controlSheet, {
+      'Active Contract Review Batch ID':batchId,
+      'Active Contract Review Created At':new Date()
+    });
+    notify_('Contract review batch created: ' + batchId + '；Branches: ' + branchIds.length + '.');
+    return { batchId, branchCount:branchIds.length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function appendCurrentBatchRows_(sheet, branchIds, batchId, makeValues) {
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(String);
+  const plan = headerNameMigrationPlan_(headers, ['Branch ID', 'Review Batch ID'], sheet.getName());
+  if (plan.missing.length) throw new Error(sheet.getName() + ' missing headers: ' + plan.missing.join(', '));
+  const branchColumn = plan.positions['Branch ID'];
+  const batchColumn = plan.positions['Review Batch ID'];
+  const existing = {};
+  values.slice(1).forEach((row, index) => {
+    if (auditText_(row[batchColumn]) !== batchId) return;
+    const branchId = auditText_(row[branchColumn]);
+    if (!branchId) return;
+    (existing[branchId] || (existing[branchId] = [])).push(index + 2);
   });
-  appendMissingEvidenceReviewRows_(evidenceSheet, branches);
-  appendMissingReviewRows_(ss.getSheetByName('Plan Classification Review'), Object.keys(branches), id => [id]);
-  appendMissingReviewRows_(ss.getSheetByName('Special Approval Review'), Object.keys(branches), id => [id]);
-  const shareIds = [...new Set(values.slice(1).map(r => auditText_(auditGet_(r, ix, 'Share Plan ID'))).filter(Boolean))];
-  appendMissingReviewRows_(ss.getSheetByName('Share Group Review'), shareIds, id => [id]);
+  const conflicts = branchIds.filter(id => existing[id] && existing[id].length)
+    .map(id => id + ': rows ' + existing[id].join(', '));
+  if (conflicts.length) throw new Error(sheet.getName() + ' batch rows already exist: ' + conflicts.join('；'));
+  const rows = branchIds.map(branchId => {
+    const row = headers.map(() => '');
+    const fields = makeValues(branchId);
+    Object.keys(fields).forEach(header => {
+      const position = headerNameMigrationPlan_(headers, [header], sheet.getName()).positions[header];
+      row[position] = fields[header];
+    });
+    return row;
+  });
+  if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+function assertCurrentBatchRows_(sheet, branchIds, batchId) {
+  const values = sheet.getDataRange().getValues();
+  const plan = headerNameMigrationPlan_(values[0].map(String), ['Branch ID', 'Review Batch ID'], sheet.getName());
+  const rowsByBranch = {};
+  values.slice(1).forEach((row, index) => {
+    if (auditText_(row[plan.positions['Review Batch ID']]) !== batchId) return;
+    const branchId = auditText_(row[plan.positions['Branch ID']]);
+    if (!branchId) return;
+    (rowsByBranch[branchId] || (rowsByBranch[branchId] = [])).push(index + 2);
+  });
+  const errors = branchIds.filter(id => !rowsByBranch[id] || rowsByBranch[id].length !== 1)
+    .map(id => id + ': ' + (rowsByBranch[id] ? rowsByBranch[id].join(', ') : 'missing'));
+  if (errors.length) throw new Error(sheet.getName() + ' current-batch identity failed: ' + errors.join('；'));
+}
+
+function setControlSettingsAtomically_(sheet, updates) {
+  const values = sheet.getDataRange().getValues();
+  const rows = {};
+  values.slice(1).forEach((row, index) => { if (row[0]) rows[auditText_(row[0])] = index + 2; });
+  const missing = Object.keys(updates).filter(key => !rows[key]);
+  if (missing.length) throw new Error('Control settings missing: ' + missing.join(', '));
+  const rowNumbers = Object.keys(updates).map(key => rows[key]);
+  const start = Math.min.apply(null, rowNumbers);
+  const end = Math.max.apply(null, rowNumbers);
+  const range = sheet.getRange(start, 2, end - start + 1, 1);
+  const output = range.getValues();
+  Object.keys(updates).forEach(key => { output[rows[key] - start][0] = updates[key]; });
+  range.setValues(output);
 }
 
 function ensureSettings_(sheet, settings) {
@@ -635,7 +880,46 @@ function ensureSettings_(sheet, settings) {
   }
 }
 
-function syncPlanCatalog_(ss, control) {
+function initializeProductionPlanReferences() {
+  const runtime = openConfiguredRenewalWorkbook_();
+  if (runtime.config.environment !== 'production') {
+    throw new Error('Production reference initialization requires ENVIRONMENT=production. Zero writes performed.');
+  }
+  const ss = runtime.ss;
+  const control = readSettings_(ss.getSheetByName('Control'));
+  assertConfiguredSourceIds_(runtime, control);
+  const depositRows = readDepositPlanReferenceSource_(control, new Date());
+  const golden = readValidatedDepositGoldenRows_();
+  assertDepositSnapshotEquivalent_(depositRows, golden, '正式訂金方案 vs validated Test golden');
+  assertValidatedDepositMapping_(ss.getSheetByName('Plan Reference Mapping'), control);
+  const result = syncPlanCatalog_(ss, control, {
+    allowDepositInitialization:true,
+    depositSourceRows:depositRows,
+    validatedDepositGoldenRows:golden
+  });
+  notify_('Production plan references initialized. TMS active plans: ' + result.activePlans.length +
+    '; Deposit snapshots: ' + result.depositRows.length + '.');
+  return result;
+}
+
+function validatePlanReferenceSourcesReadOnly_(ss, control) {
+  const sourceSpreadsheetId = auditText_(control['RSV Plan Reference Spreadsheet ID']);
+  const sourceTab = auditText_(control['RSV Plan Reference Tab']);
+  const codeHeader = auditText_(control['RSV Plan Code Header']) || 'Plan Code';
+  const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
+  if (!sourceSheet) throw new Error('RSV plan-reference tab was not found: ' + sourceTab);
+  const plans = readPlanCatalogSource_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
+  const depositRows = readDepositPlanReferenceSource_(control, new Date());
+  const existingDepositRows = readDepositSnapshotRows_(ss.getSheetByName('Plan Reference Snapshot'));
+  if (!existingDepositRows.length) {
+    throw new Error('Production Deposit baseline is not initialized. Run initializeProductionPlanReferences() first.');
+  }
+  assertDepositSnapshotEquivalent_(depositRows, existingDepositRows, '正式訂金方案 vs current workbook baseline');
+  return { activePlans:plans, depositRows };
+}
+
+function syncPlanCatalog_(ss, control, options) {
+  options = options || {};
   const sourceSpreadsheetId = auditText_(control['RSV Plan Reference Spreadsheet ID']);
   const sourceTab = auditText_(control['RSV Plan Reference Tab']);
   const codeHeader = auditText_(control['RSV Plan Code Header']) || 'Plan Code';
@@ -644,6 +928,22 @@ function syncPlanCatalog_(ss, control) {
   const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
   if (!sourceSheet) throw new Error('RSV plan-reference tab was not found: ' + sourceTab);
   const sourcePlans = readPlanCatalogSource_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
+  const snapshotSheet = ss.getSheetByName('Plan Reference Snapshot');
+  if (!snapshotSheet) throw new Error('Plan Reference Snapshot sheet was not found.');
+  const depositSourceRows = options.depositSourceRows || readDepositPlanReferenceSource_(control, new Date());
+  const existingDepositRows = readDepositSnapshotRows_(snapshotSheet);
+  let depositRows = existingDepositRows;
+  if (!existingDepositRows.length) {
+    if (!options.allowDepositInitialization) {
+      throw new Error('Deposit baseline is missing. Run initializeProductionPlanReferences() before Build Queue or Audit.');
+    }
+    const goldenRows = options.validatedDepositGoldenRows || readValidatedDepositGoldenRows_();
+    assertDepositSnapshotEquivalent_(depositSourceRows, goldenRows, '正式訂金方案 vs validated Test golden');
+    depositRows = depositSourceRows;
+  } else {
+    assertDepositSnapshotEquivalent_(depositSourceRows, existingDepositRows,
+      '正式訂金方案 vs current workbook Deposit baseline');
+  }
   const catalogSheet = ensureReviewSheet_(ss, 'Canonical Plan Catalog', CANONICAL_PLAN_HEADERS);
   const changeSheet = ensureReviewSheet_(ss, 'Plan Catalog Change Review', PLAN_CHANGE_HEADERS);
   const existingCatalog = readTable_(catalogSheet);
@@ -654,8 +954,8 @@ function syncPlanCatalog_(ss, control) {
     const baseline = sourcePlans.map(plan => canonicalPlanRowObject_(plan, 1, 'Active', now, '', now));
     replaceManagedTable_(catalogSheet, CANONICAL_PLAN_HEADERS, baseline.map(objectRow_(CANONICAL_PLAN_HEADERS)));
     syncPlanReferenceMapping_(ss.getSheetByName('Plan Reference Mapping'), sourceSpreadsheetId, sourceTab, codeHeader);
-    syncPlanReferenceSnapshot_(ss.getSheetByName('Plan Reference Snapshot'), baseline);
-    return { activePlans: baseline, pendingChanges: [] };
+    syncPlanReferenceSnapshot_(snapshotSheet, baseline, depositRows);
+    return { activePlans: baseline, pendingChanges: [], depositRows };
   }
 
   const catalog = existingCatalog.map(normalizeCanonicalPlanRow_).filter(Boolean);
@@ -753,8 +1053,135 @@ function syncPlanCatalog_(ss, control) {
       .map(objectRow_(PLAN_CHANGE_HEADERS)));
   const active = catalog.filter(row => row.status === 'Active');
   syncPlanReferenceMapping_(ss.getSheetByName('Plan Reference Mapping'), sourceSpreadsheetId, sourceTab, codeHeader);
-  syncPlanReferenceSnapshot_(ss.getSheetByName('Plan Reference Snapshot'), active);
-  return { activePlans: active, pendingChanges: pending };
+  syncPlanReferenceSnapshot_(snapshotSheet, active, depositRows);
+  return { activePlans: active, pendingChanges: pending, depositRows };
+}
+
+function readDepositPlanReferenceSource_(control, importedAt) {
+  const sourceSpreadsheetId = auditText_(control['Plan Reference Spreadsheet ID']);
+  const sourceTab = auditText_(control['Deposit Plan Reference Tab']) || '訂金方案';
+  if (!sourceSpreadsheetId || !sourceTab) throw new Error('Deposit plan-reference source is not configured.');
+  const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
+  if (!sourceSheet) throw new Error('Deposit plan-reference tab was not found: ' + sourceTab);
+  const values = sourceSheet.getDataRange().getDisplayValues();
+  const rows = [];
+  values.forEach((sourceRow, index) => {
+    const displayValues = depositDisplayValues_(sourceRow);
+    if (!displayValues.some(value => value !== null)) return;
+    const rowNumber = index + 1;
+    rows.push([
+      'PLAN-Deposit-' + rowNumber,
+      'Deposit',
+      sourceSpreadsheetId,
+      sourceTab,
+      rowNumber,
+      importedAt,
+      JSON.stringify({ values:displayValues }),
+      '',
+      ''
+    ]);
+  });
+  return rows;
+}
+
+function depositDisplayValues_(row) {
+  const values = (row || []).map(value => auditText_(value) === '' ? null : String(value));
+  while (values.length && values[values.length - 1] === null) values.pop();
+  return values;
+}
+
+function readDepositSnapshotRows_(sheet) {
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  const values = sheet.getDataRange().getValues();
+  const plan = headerNameMigrationPlan_(values[0].map(String), PLAN_REFERENCE_SNAPSHOT_HEADERS, sheet.getName());
+  if (plan.missing.length) throw new Error(sheet.getName() + ' missing headers: ' + plan.missing.join(', '));
+  return values.slice(1).filter(row => auditText_(row[plan.positions['Plan Family']]) === 'Deposit')
+    .map(row => PLAN_REFERENCE_SNAPSHOT_HEADERS.map(header => row[plan.positions[header]]));
+}
+
+function readValidatedDepositGoldenRows_() {
+  const goldenWorkbook = SpreadsheetApp.openById(RENEWAL_QUEUE_VALIDATED_TEST_WORKBOOK_ID);
+  const sheet = goldenWorkbook.getSheetByName('Plan Reference Snapshot');
+  const rows = readDepositSnapshotRows_(sheet);
+  if (!rows.length) throw new Error('Validated Test Deposit golden fixture is empty.');
+  return rows;
+}
+
+function depositSnapshotComparable_(row) {
+  const ix = headerIndex_(PLAN_REFERENCE_SNAPSHOT_HEADERS);
+  const raw = auditText_(row[requiredHeader_(ix, 'Raw Values JSON', 'Deposit snapshot')]);
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (error) {
+    throw new Error('Deposit snapshot Raw Values JSON is invalid: ' + error.message);
+  }
+  return {
+    snapshotId:auditText_(row[requiredHeader_(ix, 'Snapshot ID', 'Deposit snapshot')]),
+    planFamily:auditText_(row[requiredHeader_(ix, 'Plan Family', 'Deposit snapshot')]),
+    sourceSpreadsheetId:auditText_(row[requiredHeader_(ix, 'Source Spreadsheet ID', 'Deposit snapshot')]),
+    sourceTab:auditText_(row[requiredHeader_(ix, 'Source Tab', 'Deposit snapshot')]),
+    sourceRow:Number(row[requiredHeader_(ix, 'Source Row', 'Deposit snapshot')]),
+    rawValues:depositDisplayValues_(parsed.values || []),
+    normalizedCombinationId:auditText_(row[requiredHeader_(ix, 'Normalized Combination ID', 'Deposit snapshot')]),
+    specialPlanFlag:auditText_(row[requiredHeader_(ix, 'Special Plan Flag', 'Deposit snapshot')])
+  };
+}
+
+function assertDepositSnapshotEquivalent_(actualRows, expectedRows, scope) {
+  const actual = (actualRows || []).map(depositSnapshotComparable_);
+  const expected = (expectedRows || []).map(depositSnapshotComparable_);
+  const byRow = rows => rows.reduce((out, row) => (out[row.sourceRow] = row, out), {});
+  const actualByRow = byRow(actual);
+  const expectedByRow = byRow(expected);
+  const rowNumbers = [...new Set(Object.keys(actualByRow).concat(Object.keys(expectedByRow)))].map(Number)
+    .sort((a, b) => a - b);
+  const differences = [];
+  rowNumbers.forEach(rowNumber => {
+    const actualRow = actualByRow[rowNumber];
+    const expectedRow = expectedByRow[rowNumber];
+    if (!actualRow) differences.push('source row ' + rowNumber + ' missing from importer output');
+    else if (!expectedRow) differences.push('source row ' + rowNumber + ' added in importer output');
+    else if (JSON.stringify(actualRow) !== JSON.stringify(expectedRow)) {
+      differences.push('source row ' + rowNumber + ' changed：expected ' + JSON.stringify(expectedRow) +
+        '、actual ' + JSON.stringify(actualRow));
+    }
+  });
+  if (differences.length || actual.length !== expected.length) {
+    throw new Error(scope + ' failed (' + actual.length + '/' + expected.length + ' rows): ' +
+      (differences.length ? differences.join('；') : 'row count mismatch') + '. Zero writes performed.');
+  }
+  return { rowCount:actual.length };
+}
+
+function assertValidatedDepositMapping_(sheet, control) {
+  if (!sheet) throw new Error('Plan Reference Mapping sheet was not found.');
+  const matches = readTable_(sheet).filter(row => auditText_(row['Mapping ID']) === 'Plan.Deposit');
+  if (matches.length !== 1) {
+    throw new Error('Plan Reference Mapping must contain exactly one validated Plan.Deposit row; found ' +
+      matches.length + '. Zero writes performed.');
+  }
+  const row = matches[0];
+  const expected = {
+    'Plan Family':'Deposit',
+    'Source Spreadsheet ID':auditText_(control['Plan Reference Spreadsheet ID']),
+    'Source Tab':auditText_(control['Deposit Plan Reference Tab']) || '訂金方案',
+    'Layout Type':'Row package',
+    'Header Row':'section header row',
+    'Data Start Row':'following rows',
+    'Header Group':'Section header',
+    'Header Label':'B2B/B2C + Prepayment/Pre-Authorisation',
+    'Canonical Plan Field':'deposit_package',
+    'Data Type':'text',
+    'Normalization':'normalize type and feature flags',
+    'Required In Combination':'Yes',
+    'Combination Key Part':'Yes',
+    'Special Plan Flag Rule':'See special label',
+    'Status':'Active'
+  };
+  const differences = Object.keys(expected).filter(key => auditText_(row[key]) !== expected[key]);
+  if (differences.length) {
+    throw new Error('Validated Plan.Deposit mapping differs at: ' + differences.join(', ') +
+      '. Zero writes performed.');
+  }
 }
 
 function readPlanCatalogSource_(sheet, spreadsheetId, sourceSheet, codeHeader) {
@@ -1026,10 +1453,13 @@ function syncPlanReferenceMapping_(sheet, sourceSpreadsheetId, sourceTab, codeHe
   replaceManagedTable_(sheet, PLAN_REFERENCE_MAPPING_HEADERS, rows.concat(preserved));
 }
 
-function syncPlanReferenceSnapshot_(sheet, activePlans) {
+function syncPlanReferenceSnapshot_(sheet, activePlans, depositRows) {
   if (!sheet) throw new Error('Plan Reference Snapshot sheet was not found.');
-  const headers = ['Snapshot ID','Plan Family','Source Spreadsheet ID','Source Tab','Source Row','Imported At','Raw Values JSON','Normalized Combination ID','Special Plan Flag'];
-  const existing = readTable_(sheet).filter(row => !/^RSV\b/i.test(auditText_(row['Plan Family'])));
+  const headers = PLAN_REFERENCE_SNAPSHOT_HEADERS;
+  const existing = readTable_(sheet).filter(row => {
+    const family = auditText_(row['Plan Family']);
+    return !/^RSV\b/i.test(family) && family !== 'Deposit';
+  });
   const importedAt = new Date();
   const rsvRows = activePlans.map(plan => [
     plan.planCode + '-V' + plan.version,
@@ -1039,7 +1469,7 @@ function syncPlanReferenceSnapshot_(sheet, activePlans) {
     plan.planCode, ''
   ]);
   const preserved = existing.map(row => headers.map(header => row[header] === undefined ? '' : row[header]));
-  replaceManagedTable_(sheet, headers, rsvRows.concat(preserved));
+  replaceManagedTable_(sheet, headers, rsvRows.concat(depositRows || [], preserved));
 }
 
 function loadLegacyBranchOrigins_(ss, control, branchIds) {

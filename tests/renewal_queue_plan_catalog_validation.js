@@ -6,11 +6,14 @@ const vm = require('vm');
 const source = fs.readFileSync('RenewalQueue.gs', 'utf8') + `
 globalThis.__test = {
   buildQueue,
+  buildQueueWithMode_,
   runContractAudit,
   maintainPlanCodes,
   readPlanCatalogSource_,
   assignMissingPlanCodes_:typeof assignMissingPlanCodes_ === 'function' ? assignMissingPlanCodes_ : null,
   syncPlanCatalog_,
+  readDepositPlanReferenceSource_,
+  assertDepositSnapshotEquivalent_,
   canonicalPlanHeaders:CANONICAL_PLAN_HEADERS,
   planChangeHeaders:PLAN_CHANGE_HEADERS,
   planReferenceMappingHeaders:PLAN_REFERENCE_MAPPING_HEADERS
@@ -36,6 +39,8 @@ const api = context.__test;
 
 const SOURCE_ID = 'TMS-SOURCE';
 const SOURCE_TAB = 'TMS 方案';
+const DEPOSIT_SOURCE_ID = 'DEPOSIT-SOURCE';
+const DEPOSIT_SOURCE_TAB = '訂金方案';
 const SOURCE_HEADERS = [
   'Source Tab', '繳款週期', '產品', '使用組數', '贈送組數',
   '月費 / 年費', '每組超額單價', 'Plan Code'
@@ -139,12 +144,56 @@ const SNAPSHOT_HEADERS = [
   'Special Plan Flag'
 ];
 
+const DEPOSIT_MAPPING_ROW = [
+  'Plan.Deposit', 'Deposit', DEPOSIT_SOURCE_ID, DEPOSIT_SOURCE_TAB, 'Row package',
+  'section header row', 'following rows', 'Section header',
+  'B2B/B2C + Prepayment/Pre-Authorisation', 'deposit_package', 'text',
+  'normalize type and feature flags', 'Yes', 'Yes', 'See special label', 'Active',
+  'Each source row is one inseparable Deposit package'
+];
+const DEPOSIT_DISPLAY_ROWS = [
+  [],
+  ['2025 加值訂金功能報價一覽表'],
+  ['B2C', 'Prepayment\n預付', '月費', '建立費/組', '信用卡交易手續費',
+    '虛擬ATM 交易手續費', 'Pre-order', 'Experience'],
+  ['', '', '$1,500', '$0', '4%', '1%', '可使用', '可使用']
+];
+
+function depositSourceSheet(rows = DEPOSIT_DISPLAY_ROWS) {
+  const values = rows.map(row => row.slice());
+  return {
+    getName:() => DEPOSIT_SOURCE_TAB,
+    getDataRange:() => ({
+      getDisplayValues:() => values.map(row => row.slice()),
+      getValues:() => values.map(row => row.slice())
+    })
+  };
+}
+
+const depositSourceFixture = depositSourceSheet();
+sourceBooks[DEPOSIT_SOURCE_ID] = {
+  getSheetByName:name => name === DEPOSIT_SOURCE_TAB ? depositSourceFixture : null
+};
+
+function depositControl() {
+  return {
+    'Plan Reference Spreadsheet ID':DEPOSIT_SOURCE_ID,
+    'Deposit Plan Reference Tab':DEPOSIT_SOURCE_TAB
+  };
+}
+
+function depositBaselineRows() {
+  return api.readDepositPlanReferenceSource_(depositControl(), '2026-08-27');
+}
+
 function catalogWorkbook(catalogRows) {
   const sheets = {
     'Canonical Plan Catalog':tableSheet('Canonical Plan Catalog', api.canonicalPlanHeaders, catalogRows),
     'Plan Catalog Change Review':tableSheet('Plan Catalog Change Review', api.planChangeHeaders),
-    'Plan Reference Mapping':tableSheet('Plan Reference Mapping', api.planReferenceMappingHeaders),
-    'Plan Reference Snapshot':tableSheet('Plan Reference Snapshot', SNAPSHOT_HEADERS)
+    'Plan Reference Mapping':tableSheet('Plan Reference Mapping', api.planReferenceMappingHeaders,
+      [DEPOSIT_MAPPING_ROW]),
+    'Plan Reference Snapshot':tableSheet('Plan Reference Snapshot', SNAPSHOT_HEADERS,
+      depositBaselineRows())
   };
   return { sheets, getSheetByName:name => sheets[name] || null };
 }
@@ -227,7 +276,8 @@ let testWorkbook = catalogWorkbook([catalogRow()]);
 let syncResult = api.syncPlanCatalog_(testWorkbook, {
   'RSV Plan Reference Spreadsheet ID':SOURCE_ID,
   'RSV Plan Reference Tab':SOURCE_TAB,
-  'RSV Plan Code Header':'Plan Code'
+  'RSV Plan Code Header':'Plan Code',
+  ...depositControl()
 });
 assert.strictEqual(sourceSheetFixture.writes.length, writesAfterMaintenance);
 let catalogRows = rowsAsObjects(testWorkbook.sheets['Canonical Plan Catalog']);
@@ -250,7 +300,8 @@ testWorkbook = catalogWorkbook([catalogRow()]);
 syncResult = api.syncPlanCatalog_(testWorkbook, {
   'RSV Plan Reference Spreadsheet ID':SOURCE_ID,
   'RSV Plan Reference Tab':SOURCE_TAB,
-  'RSV Plan Code Header':'Plan Code'
+  'RSV Plan Code Header':'Plan Code',
+  ...depositControl()
 });
 assert.strictEqual(sourceSheetFixture.writes.length, 0);
 assert.strictEqual(syncResult.pendingChanges.length, 1);
@@ -263,7 +314,7 @@ assert.strictEqual(catalogRows[0].Price, 21600);
 // External write-scope guard: Build/Audit must enter the live Catalog through
 // the read-only adapter. The source writer remains reachable only from the
 // explicit maintenance entry point.
-const buildSource = api.buildQueue.toString();
+const buildSource = api.buildQueueWithMode_.toString();
 const auditSource = api.runContractAudit.toString();
 const syncSource = api.syncPlanCatalog_.toString();
 const readerSource = api.readPlanCatalogSource_.toString();

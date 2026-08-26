@@ -1,13 +1,13 @@
 # TPR 續約受控更新與合約稽核規格
 
-> 狀態：受控實作基準（Build／Audit 只寫測試工作簿；Plan Code 維護須另行明確授權）
+> 狀態：受控實作基準（Build／Audit 只寫 Script Properties 指定的 Audit workbook；Plan Code 維護須另行明確授權）
 > 本文件整合「TPR 續約測試工作區規格書」與「TPR 續約更新與合約稽核規格」。兩者有範圍差異時，以本文件的階段邊界為準。
 
 ## 1. 目的、範圍與不可違反原則
 
 本規格定義從舊 TPR、Renewal DB、文件證據與方案參照表產生 `TPR Update Queue` 的未來受控流程。目標是建立可追溯、可審核、以 Branch ID 為原子單位的續約更新機制。
 
-本階段允許經使用者要求修改 Google Apps Script，並寫入測試工作簿的 Queue、覆核表與方案管理表。Build Queue／Run Contract Audit 對正式 TPR、Renewal DB 與方案參照表一律唯讀；官方 RSV／RwG 方案表的永久 `Plan Code` 只能由另行授權的 explicit maintenance action 補入空白 cell。
+本階段允許經使用者要求修改 Google Apps Script，並寫入環境 identity 驗證通過的 Test／Production Audit workbook。兩環境必須分離，target 由 Script Properties 指定。Build Queue／Run Contract Audit 對正式 TPR、Renewal DB 與方案參照表一律唯讀；官方 RSV／RwG 方案表的永久 `Plan Code` 只能由另行授權的 explicit maintenance action 補入空白 cell。
 
 後續實作必須遵守：
 
@@ -53,6 +53,14 @@
 匯入時，使用者於 `Control` 指定 `Renewal Month`（如 `202607`）與 Branch ID 清單；流程必須以月份名稱找到同名 Renewal DB 分頁，不能依分頁位置。每筆 Snapshot 均須保存原始值、來源 Spreadsheet、分頁、列號與匯入時間。
 
 Renewal DB 找不到、重複而無法合併，或必要欄位不足時，仍可建立 Queue 稽核項，但必須標記 `Need Renewal Data` 或 `Need Check`，不得猜測或標為 Ready。
+
+`Plan.Deposit` 沿用 validated static mapping。正式 `訂金方案` importer 使用 display values，只保存非空
+source rows並建立 `PLAN-Deposit-{Source Row}`；首次 Production baseline 排除 Imported At 後須與
+validated 44-row golden fixture 完全一致。Snapshot 由正式 source重建，不複製 Test runtime rows。
+
+Queue lifecycle 與 Review lifecycle 分離：`buildQueue()` 不新增 review data rows；Queue 成功後才建立
+新的 Active Review Batch，並為每個 Queue Branch 建立唯一 current-batch Contract Evidence／Plan
+Classification row。缺列或重複列均 fail closed。
 
 ## 4. 欄位解析與標準化
 

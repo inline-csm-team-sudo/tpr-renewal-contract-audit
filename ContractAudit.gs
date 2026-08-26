@@ -1,9 +1,8 @@
 /**
- * Test-only contract gate for the Renewal Queue.  It writes only to the
- * test workbook and never changes the original TPR or Renewal DB sources.
- * Evidence, seals and exception approvals deliberately require a reviewer.
+ * Historical contract-gate helpers.  The active entry point lives in
+ * RenewalQueue.gs and resolves its writable workbook through Script
+ * Properties; formal TPR and Renewal DB sources remain read-only.
  */
-const AUDIT2_TEST_BOOK_ID = '1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4';
 const AUDIT2_TPR_BOOK_ID = '1rZVU-n85eDh_ueaRyQojP8dSm4-MTeBz8frIyZynnb4';
 const AUDIT2_QUEUE_TAB = 'TPR Update Queue';
 const AUDIT2_QUEUE_HEADERS = [
@@ -41,7 +40,7 @@ const AUDIT2_SHARE_HEADERS = [
 ];
 
 function installContractAuditMenu() {
-  const ss = SpreadsheetApp.openById(AUDIT2_TEST_BOOK_ID);
+  const ss = openConfiguredRenewalWorkbook_().ss;
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'audit2OnOpen')
     .forEach(t => ScriptApp.deleteTrigger(t));

@@ -25,7 +25,10 @@ without exposing Queue plan values to the reader; compare with Queue only after 
 - Treat original TPR, Renewal DB, plan-reference sheets, contracts, and emails as read-only during
   Build Queue and Audit. Maintain official RSV／RwG `Plan Code` values only through the explicit
   `maintainPlanCodes()` maintenance action after separate user authorization.
-- Write only to the test workbook Queue, review sheets, and Audit Log unless the user separately and explicitly authorizes a formal TPR writeback.
+- Write only to the environment workbook identified by validated Script Properties. Test and Production
+  must use different workbook and Apps Script project IDs. Even in Production, formal TPR, Renewal DB,
+  TMS and Deposit sources remain read-only unless the user separately authorizes the explicit
+  `maintainPlanCodes()` exception; normal audit output never means formal TPR writeback is authorized.
 - Do not use `合約後補更新 Tool.xlsx` for this workflow.
 - Resolve spreadsheet fields by normalized header title and mapping key, never by fixed column letter.
 
@@ -35,9 +38,12 @@ When the user says「從頭跑一次續約流程」or equivalent:
 
 1. Read TPR rows whose selection checkbox is `TRUE`.
 2. Parse each selected row's `Demand` into one or more `YYYYMM` Renewal DB tabs.
-3. Run or reproduce Build Queue using only those months.
+3. Run or reproduce Build Queue using only those months. `buildQueue()` creates Queue data and sheet
+   schemas only; it must not create blank-batch review rows.
 4. Confirm the Queue preserves TPR identity and context fields and replaces only renewal-plan fields.
-5. Build one Branch-level review set from all Queue product rows for that Branch ID.
+5. Explicitly create a new Review Batch after Queue build, then build one Branch-level review set from all
+   Queue product rows for that Branch ID. Every current-batch Branch must have exactly one Contract
+   Evidence and one Plan Classification identity row before extraction starts.
 6. Open every contract, email, image, or folder linked by the selected branches and inventory the complete relevant evidence set for each Branch.
 7. For PDFs or photographs, inspect every relevant page visually; OCR or extracted text is only an aid.
 8. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.

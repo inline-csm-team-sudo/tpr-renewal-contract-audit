@@ -1,0 +1,605 @@
+{
+  "sourceSpreadsheetId": "1QhNSdtg5TueFSoNBY8lFxXbtp_UktY1g8l7EUQWJ5kU",
+  "sourceTab": "訂金方案",
+  "expectedRowCount": 44,
+  "rows": [
+    {
+      "snapshotId": "PLAN-Deposit-2",
+      "sourceRow": 2,
+      "displayValues": [
+        "2025 加值訂金功能報價一覽表"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-3",
+      "sourceRow": 3,
+      "displayValues": [
+        "B2B",
+        "Prepayment\n預付",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "ATM 功能",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-4",
+      "sourceRow": 4,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$0",
+        "2%",
+        "不可使用",
+        "可使用",
+        "可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-5",
+      "sourceRow": 5,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$0",
+        "1%",
+        "不可使用",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-6",
+      "sourceRow": 6,
+      "displayValues": [
+        null,
+        null,
+        "$1,800",
+        "$0",
+        "2%",
+        "可使用",
+        "可使用",
+        "可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-7",
+      "sourceRow": 7,
+      "displayValues": [
+        null,
+        null,
+        "$1,800",
+        "$0",
+        "1%",
+        "可使用",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-8",
+      "sourceRow": 8,
+      "displayValues": [
+        null,
+        null,
+        "$0",
+        "$5",
+        "2.5%",
+        "不可使用",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-10",
+      "sourceRow": 10,
+      "displayValues": [
+        "B2B",
+        "Pre-Authorisation\n綁卡",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "ATM功能",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-11",
+      "sourceRow": 11,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$10",
+        "1%",
+        "-",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-12",
+      "sourceRow": 12,
+      "displayValues": [
+        null,
+        null,
+        "$0",
+        "$20",
+        "2.5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-14",
+      "sourceRow": 14,
+      "displayValues": [
+        "B2C",
+        "Prepayment\n預付",
+        "月費",
+        "建立費/組",
+        "信用卡交易手續費",
+        "虛擬ATM 交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-15",
+      "sourceRow": 15,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$0",
+        "4%",
+        "1%",
+        "可使用",
+        "可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-16",
+      "sourceRow": 16,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$0",
+        "3%",
+        "1%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-17",
+      "sourceRow": 17,
+      "displayValues": [
+        null,
+        null,
+        "$0",
+        "$5",
+        "4.5%",
+        "1.5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-19",
+      "sourceRow": 19,
+      "displayValues": [
+        "B2C",
+        "Pre-Authorisation\n綁卡",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-20",
+      "sourceRow": 20,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$10",
+        "5%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-21",
+      "sourceRow": 21,
+      "displayValues": [
+        null,
+        null,
+        "$0",
+        "$20",
+        "5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-23",
+      "sourceRow": 23,
+      "displayValues": [
+        "B2B",
+        "Only ATM\n純ATM",
+        "月費",
+        "ATM 建立費/組",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-24",
+      "sourceRow": 24,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$5",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-26",
+      "sourceRow": 26,
+      "displayValues": [
+        "B2C",
+        "Only ATM\n純ATM",
+        "月費",
+        "建立費/組",
+        "虛擬ATM 交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-27",
+      "sourceRow": 27,
+      "displayValues": [
+        null,
+        null,
+        "$1,500",
+        "$0",
+        "1%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-28",
+      "sourceRow": 28,
+      "displayValues": [
+        null,
+        null,
+        "$0",
+        "$5",
+        "1.5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-30",
+      "sourceRow": 30,
+      "displayValues": [
+        null,
+        "既有訂金客戶折扣 ＆ 展店 (CSM+BD)"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-31",
+      "sourceRow": 31,
+      "displayValues": [
+        "B2B",
+        "Prepayment\n預付",
+        "新客戶方案",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "ATM 功能",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-32",
+      "sourceRow": 32,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$800",
+        "$0",
+        "2%",
+        "不可使用",
+        "可使用",
+        "可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-33",
+      "sourceRow": 33,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$800",
+        "$0",
+        "1%",
+        "不可使用",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-34",
+      "sourceRow": 34,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$1,100",
+        "$0",
+        "2%",
+        "可使用",
+        "可使用",
+        "可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-35",
+      "sourceRow": 35,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$1,100",
+        "$0",
+        "1%",
+        "可使用",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-36",
+      "sourceRow": 36,
+      "displayValues": [
+        null,
+        null,
+        "特殊方案",
+        "$0",
+        "$5",
+        "2.5%",
+        "不可使用",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-38",
+      "sourceRow": 38,
+      "displayValues": [
+        "B2B",
+        "Pre-Authorisation\n綁卡",
+        "方案",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-39",
+      "sourceRow": 39,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$800",
+        "$5",
+        "1%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-40",
+      "sourceRow": 40,
+      "displayValues": [
+        null,
+        null,
+        "特殊方案",
+        "$0",
+        "$10",
+        "2.5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-42",
+      "sourceRow": 42,
+      "displayValues": [
+        "B2C",
+        "Prepayment\n預付",
+        "新客戶方案",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "虛擬ATM 交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-43",
+      "sourceRow": 43,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$800",
+        "$0",
+        "4%",
+        "1%",
+        "可使用",
+        "可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-44",
+      "sourceRow": 44,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$800",
+        "$0",
+        "3%",
+        "1%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-45",
+      "sourceRow": 45,
+      "displayValues": [
+        null,
+        null,
+        "特殊方案",
+        "$0",
+        "$5",
+        "4.5%",
+        "1.5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-47",
+      "sourceRow": 47,
+      "displayValues": [
+        "B2C",
+        "Pre-Authorisation\n綁卡",
+        "方案",
+        "月費",
+        "建立費/組",
+        "交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-48",
+      "sourceRow": 48,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "NT$800",
+        "NT$5",
+        "5%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-49",
+      "sourceRow": 49,
+      "displayValues": [
+        null,
+        null,
+        "特殊方案",
+        "NT$0",
+        "NT$10",
+        "5%",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-51",
+      "sourceRow": 51,
+      "displayValues": [
+        "B2B",
+        "Only ATM\n純ATM",
+        "月費",
+        "ATM 建立費/組",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-52",
+      "sourceRow": 52,
+      "displayValues": [
+        null,
+        null,
+        "$300",
+        "$10",
+        "不可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-54",
+      "sourceRow": 54,
+      "displayValues": [
+        "B2C",
+        "Only ATM\n純ATM",
+        "方案",
+        "月費",
+        "建立費/組",
+        "虛擬ATM 交易手續費",
+        "Pre-order",
+        "Experience"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-55",
+      "sourceRow": 55,
+      "displayValues": [
+        null,
+        null,
+        "公版方案 (優先銷售)",
+        "$300",
+        "$0",
+        "1%",
+        "可使用",
+        "不可使用"
+      ]
+    },
+    {
+      "snapshotId": "PLAN-Deposit-56",
+      "sourceRow": 56,
+      "displayValues": [
+        null,
+        null,
+        "特殊方案",
+        "$0",
+        "$5",
+        "1.5%",
+        "不可使用",
+        "不可使用"
+      ]
+    }
+  ]
+}

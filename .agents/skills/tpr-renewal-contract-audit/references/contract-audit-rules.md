@@ -35,12 +35,19 @@
 
 來源連結或分頁改變時，優先讀取測試工作簿 `Control` 的目前設定；不要把本表視為永遠固定。
 
+Test 與 Production 共用同一套 business logic，但必須使用不同 Apps Script project 與 workbook。
+每個 project 以 Script Properties 明確設定 `ENVIRONMENT`、`TARGET_WORKBOOK_ID`、
+`EXPECTED_WORKBOOK_NAME` 及四個正式 source IDs；任何主要 entrypoint 在第一次 mutation 前都要驗證
+project environment、workbook ID／名稱、Test／Production sentinel 與 `Control` source IDs 完全一致，
+任一不符即 zero writes、fail closed。
+
 ### 1.2 寫入邊界
 
 - 可寫：`TPR Update Queue`、`Contract Evidence Review`、`Plan Classification Review`、`Special Approval Review`、`Share Group Review`、`Audit Log` 及明確的設定表。
 - `Build Queue` 與 `Run Contract Audit` 對正式 TPR、Renewal DB 及所有方案參照表一律唯讀；每次仍須讀取最新 `TMS 方案` 以偵測 Catalog 的新增、修改與刪除。
 - 官方 RSV／RwG 方案表唯一可寫欄位是經使用者另行授權後，由明確的 `maintainPlanCodes()` maintenance action 補入空白的永久 `Plan Code` cell。Maintenance 不得重寫既有代碼或方案數值；一般 Build／Audit path 不具來源寫入權。
 - `Check=TRUE` 只代表測試 Queue 通過，不代表已獲授權寫回正式 TPR。
+- Production Audit 的正常 output 也只可寫 Production Audit workbook；不代表獲授權寫回正式 TPR。
 
 ## 2. 完整處理流程
 
@@ -51,12 +58,15 @@
 3. 同一 Branch ID 出現互相矛盾的 Demand 月份時停止該店並註明衝突。
 4. 只讀取實際需要的 Renewal DB 月份分頁。
 5. 建立 Queue 後，以 Branch ID 彙整主產品與全部加購產品。
-6. 逐份閱讀合約、信件、照片及資料夾內相關文件，並完成每個 Branch 的 relevant evidence set 盤點。
-7. 新版案件以 provider-neutral schema 填寫 `Structured Contract Data`；程式逐項與 Queue 比較後計算 Document Match。
-8. 填寫四張覆核表。
-9. 完成 Branch 層級判斷，再將結果套用至該 Branch 的所有產品列。
-10. 回填 Queue 的 `Check` 與單行 `Note`。
-11. 驗證列數、未勾選原因、覆核者及日期，最後寫入 Audit Log。
+6. `Build Queue` 只建立 Queue 與 review sheet schemas，不得預先新增 blank-batch review rows；Queue
+   成功後另由明確的 batch-preparation action 產生新 Review Batch，為每個 Branch 建立唯一 current-batch
+   Contract Evidence／Plan Classification identity。
+7. 逐份閱讀合約、信件、照片及資料夾內相關文件，並完成每個 Branch 的 relevant evidence set 盤點。
+8. 新版案件以 provider-neutral schema 填寫 `Structured Contract Data`；程式逐項與 Queue 比較後計算 Document Match。
+9. 填寫四張覆核表。
+10. 完成 Branch 層級判斷，再將結果套用至該 Branch 的所有產品列。
+11. 回填 Queue 的 `Check` 與單行 `Note`。
+12. 驗證列數、未勾選原因、覆核者及日期，最後寫入 Audit Log。
 
 ## 3. Queue 建立與欄位規則
 
@@ -265,6 +275,12 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - `Build Queue`／`Run Contract Audit` 每次從正式 `TMS 方案` 唯讀取得最新來源並執行 Catalog diff。所有 supported plan rows 的 Plan Code 必須完整且唯一；空白時整次流程 fail closed，錯誤列出 source row 與方案事實，不得在 Audit 中臨時配碼或回寫來源。
 - 新方案配碼是獨立 maintenance：只有明確執行 `maintainPlanCodes()` 時才重新檢查最新 source snapshot、duplicate 與最大 `TMS-XXXX`，並只寫空白 Plan Code cells。無效方案不配碼，既有非空代碼不得改寫；寫後必須 read-back 驗證唯一性。完成後重新執行 sync／Build／Audit，新的永久代碼方案才可建立 Catalog v1 Active。
 - RSV／RwG 的 `Plan Reference Mapping` 必須由同步流程依官方 `TMS 方案` 的 row-package 欄位重建；不得再保留舊公版／BD 分頁的 column-package Mapping。Deposit Mapping 原封保留。
+- Deposit `Plan.Deposit` 是 validated static Mapping。Deposit snapshot 不得從 Test runtime data直接複製；
+  importer 必須對正式 `訂金方案` 使用 `getDisplayValues()`、只保留非空 source rows、維持 row identity
+  與順序，並建立 `PLAN-Deposit-{Source Row}`。首次 Production initialization 將 importer output 與
+  validated Test golden fixture 比較，排除 `Imported At` 後必須 44／44 完全一致；後續正常 sync 只將
+  正式 source 與 Production 已核准 baseline 比較。任何新增、刪除、row identity 或 formatted value
+  變更都 fail closed，不自行建立 normalized Deposit combination ID、special flag 或新 business semantics。
 - 官方方案表的既有方案修改或刪除，必須進入 `Plan Catalog Change Review`。尚未核准時沿用上一個已確認版本，受影響 Branch 不得通過；其他 Branch 不受影響。刪除核准後標為 `Inactive`，不得刪除歷史版本。
 
 | 舊方案 → 新方案 | 特殊申請 |

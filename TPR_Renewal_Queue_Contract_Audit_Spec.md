@@ -4,7 +4,7 @@
 
 本流程將 TPR 中標示需續約檢查的分店，依 Renewal DB 的「新方案」轉成正式 TPR 格式的 Queue，並以合約／信件、方案規則、特殊申請及 Share Plan 條件進行稽核。
 
-流程只可寫入測試工作表的 Queue、覆核表與方案管理表；**Build Queue／Run Contract Audit 不得寫回原始 TPR、Renewal DB 或任何方案參照表**。官方 RSV／RwG 方案表的永久 `Plan Code` 只能在使用者另行授權並明確執行 `maintainPlanCodes()` 時補入空白 cell。
+流程只可寫入經 Script Properties 驗證的 Test 或 Production Audit workbook；**Build Queue／Run Contract Audit 不得寫回原始 TPR、Renewal DB 或任何方案參照表**。Test／Production 必須使用不同 workbook 與 Apps Script project。官方 RSV／RwG 方案表的永久 `Plan Code` 只能在使用者另行授權並明確執行 `maintainPlanCodes()` 時補入空白 cell。
 
 最終輸出為 Queue 前方的：
 
@@ -24,9 +24,14 @@
 | 原始 TPR | 選取分店、舊方案、Demand、Comment、合約連結、後段更新欄位來源 | 唯讀 |
 | Renewal DB | 續約月份及新方案資料來源 | 唯讀 |
 | 方案參照表 | 公版、BD 新方案、訂金方案與方案家族判斷來源 | 唯讀 |
-| 測試工作表 | Control、設定表、Queue、快照、覆核表、Audit Log | 可寫 |
+| Audit 工作簿 | Control、設定表、Queue、快照、覆核表、Audit Log | 只可寫目前環境明確指定的 workbook |
 
 目前測試工作表 ID：`1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4`。
+
+Production target 不得硬編碼。Apps Script 必須以 `ENVIRONMENT`、`TARGET_WORKBOOK_ID`、
+`EXPECTED_WORKBOOK_NAME` 與四個 source ID Script Properties 做首次寫入前的 fail-closed identity check。
+`buildQueue()` 只建立 Queue 與 review schemas；Review Batch 與 current-batch rows 由後續明確 action 建立，
+不得產生 blank-batch historical rows。
 
 ## 3. 批次選取規則
 

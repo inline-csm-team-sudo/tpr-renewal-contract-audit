@@ -15,16 +15,24 @@ const QUEUE_AUDIT_HEADERS = [
 ];
 const EVIDENCE_REVIEW_HEADERS = [
   'Branch ID', 'Evidence URL', 'Evidence Type', 'Restaurant Name Match',
-  'Contract Period Match', 'Full Plan Match', 'Customer Explicit Consent',
+  'Contract Period Match', 'Full Plan Match', 'Manual Plan Veto', 'Customer Explicit Consent',
   'Agreement Confirmation Text', 'Confirmation Sender', 'Inline Seal',
   'Customer Seal', 'Reviewer', 'Reviewed At', 'Status', 'Notes',
   'Annual Payment Amount (NTD)', 'Billing Cycle Match',
   'Contract Start Date', 'Contract End Date',
-  'Deposit Commission Rate (%)', 'Deposit Buy-in Price (%)'
+  'Deposit Commission Rate (%)', 'Deposit Buy-in Price (%)',
+  'Document Restaurant Name', 'Document Legal Entity Name',
+  'Restaurant Name Match Result', 'Restaurant Alias Evidence',
+  'Reviewed Evidence File ID', 'Reviewed Evidence Modified At',
+  'Annual Payment Evidence Quote', 'Annual Payment Evidence Location',
+  'Structured Review Version', 'Structured Contract Data',
+  'Document Match Result', 'Document Match Detail'
 ];
 const PLAN_REVIEW_HEADERS = [
   'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
-  'Reviewer', 'Reviewed At', 'Notes'
+  'Reviewer', 'Reviewed At', 'Notes',
+  'First Contract Start Date', 'Expected Plan Family', 'Original Plan Code',
+  'New Plan Code', 'Catalog Match Rule', 'Catalog Exception', 'Origin Source'
 ];
 const SPECIAL_REVIEW_HEADERS = [
   'Branch ID', 'Approval Status', 'Evidence URL', 'Reviewer', 'Reviewed At', 'Notes'
@@ -40,13 +48,41 @@ const BONUS_AUDIT_SETTINGS = [
   ['Bonus Critical Multiplier', 2.00, '相較同使用組數公版／BD 新方案贈送組數的嚴重異常倍數。'],
   ['Bonus Minimum Extra Groups', 50, '方案參照的最低容許加送組數，用來避免小方案因少量差異被誤判。'],
   ['Contract Date Detail Required From', '2026-07-21', '此日期起的新覆核必須填入合約／信件實際起訖日，由程式自行與 Queue 比對。'],
-  ['Deposit Commission Detail Required From', '2026-07-25', '此日期起的新覆核若有 Deposit-Commission，必須填入文件中的抽成比例或買入價格。']
+  ['Deposit Commission Detail Required From', '2026-07-25', '此日期起的新覆核若有 Deposit-Commission，必須填入文件中的抽成比例或買入價格。'],
+  ['Restaurant Name Detail Required From', '2026-08-13', '此日期起的新覆核必須記錄文件實際店名、人工比對結果及所覆核的 Drive 檔案版本；簽約實體不得代替使用店家名稱。']
+];
+const PLAN_ORIGIN_SETTINGS = [
+  ['RSV Plan Reference Spreadsheet ID', '10ECF2b0yu6loRZqDl_4ynHOuc2yz-IAUjPirCj-dxvM', 'RSV／RwG 方案來源；只允許程式維護 Plan Code 欄。'],
+  ['RSV Plan Reference Tab', 'TMS 方案', 'RSV／RwG 方案來源分頁。'],
+  ['RSV Plan Code Header', 'Plan Code', '方案來源的永久代碼欄；既有代碼不得改寫。'],
+  ['Legacy Branch Master Tab', 'Legacy Branch Master', 'Legacy cohort 主檔；正常流程不得重新掃描 Raw : TPR。'],
+  ['Legacy Branch ID Header', 'Branch ID', 'Legacy Branch Master 的 Branch ID 欄位標題。']
+];
+const CANONICAL_PLAN_HEADERS = [
+  'Plan Code', 'Version', 'Status', 'Plan Family', 'Source Catalog',
+  'Billing Period', 'Product', 'Usage Sets', 'Bonus Sets', 'Price',
+  'Overage Unit Price', 'Source Spreadsheet ID', 'Source Sheet', 'Source Row',
+  'Effective From', 'Effective To', 'Imported At', 'Record JSON'
+];
+const PLAN_CHANGE_HEADERS = [
+  'Change ID', 'Plan Code', 'Change Type', 'Detected At', 'Old Version',
+  'Old Values JSON', 'New Values JSON', 'Approval Status', 'Reviewer',
+  'Reviewed At', 'Notes', 'Affected Branch IDs', 'Applied At'
+];
+const PLAN_REFERENCE_MAPPING_HEADERS = [
+  'Mapping ID', 'Plan Family', 'Source Spreadsheet ID', 'Source Tab',
+  'Layout Type', 'Header Row', 'Data Start Row', 'Header Group',
+  'Header Label', 'Canonical Plan Field', 'Data Type', 'Normalization',
+  'Required In Combination', 'Combination Key Part', 'Special Plan Flag Rule',
+  'Status', 'Notes'
 ];
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Renewal Queue')
     .addItem('Build Queue', 'buildQueue')
+    .addItem('Sync Plan Catalog', 'syncPlanCatalog')
+    .addItem('Maintain Plan Codes', 'maintainPlanCodes')
     .addItem('Run Contract Audit', 'runContractAudit')
     .addItem('Validate configuration', 'validateConfiguration')
     .addToUi();
@@ -65,7 +101,11 @@ function installTestWorkbookMenu() {
 
 function buildQueue() {
   const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
-  const control = readSettings_(ss.getSheetByName('Control'));
+  const queueTimeZone = ss.getSpreadsheetTimeZone();
+  const controlSheet = ss.getSheetByName('Control');
+  ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
+  const control = readSettings_(controlSheet);
+  syncPlanCatalog_(ss, control);
   const manualIds = String(control['Selected Branch IDs'] || '')
     .split(/[\n,\s]+/).map(String).map(s => s.trim()).filter(Boolean);
   const selectionMode = String(control['Selection Mode'] || 'TPR Check Box = TRUE');
@@ -157,7 +197,7 @@ function buildQueue() {
       output.push([...base, batchId, 'TPR!' + source.row, '', 'Need Renewal Data — manual review required']);
       return;
     }
-    const data = transformRow_(base, queueIndex, renewalRow.values, renewalSet.indexes, planRules, renewalSet.timeZone);
+    const data = transformRow_(base, queueIndex, renewalRow.values, renewalSet.indexes, planRules, renewalSet.timeZone, queueTimeZone);
     setExact_(data, queueIndex, 'Check', false);
     output.push([...data, batchId, 'TPR!' + source.row, renewalMonth + '!' + renewalRow.row, data._status || 'Converted — review required']);
   });
@@ -189,7 +229,40 @@ function validateConfiguration() {
   notify_(duplicates.length ? 'Duplicate Mapping Key: ' + duplicates.map(r => r['Mapping Key']).join(', ') : 'Configuration looks structurally valid.');
 }
 
-function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone) {
+function syncPlanCatalog() {
+  const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+  const controlSheet = ss.getSheetByName('Control');
+  ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
+  const result = syncPlanCatalog_(ss, readSettings_(controlSheet));
+  notify_('Plan catalog synced. Active plans: ' + result.activePlans.length +
+    '; pending changes: ' + result.pendingChanges.length + '.');
+}
+
+function maintainPlanCodes() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = SpreadsheetApp.openById(RENEWAL_QUEUE_TEST_WORKBOOK_ID);
+    const control = readSettings_(ss.getSheetByName('Control'));
+    const sourceSpreadsheetId = auditText_(control['RSV Plan Reference Spreadsheet ID']);
+    const sourceTab = auditText_(control['RSV Plan Reference Tab']);
+    const codeHeader = auditText_(control['RSV Plan Code Header']) || 'Plan Code';
+    if (!sourceSpreadsheetId || !sourceTab) {
+      throw new Error('RSV plan-reference source is not configured.');
+    }
+    const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
+    if (!sourceSheet) throw new Error('RSV plan-reference tab was not found: ' + sourceTab);
+    const result = assignMissingPlanCodes_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
+    notify_('Plan Code maintenance completed. Assigned codes: ' +
+      (result.assignments.length
+        ? result.assignments.map(item => sourceTab + '!' + item.rowNumber + '=' + item.planCode).join(', ')
+        : 'none') + '. Run Sync Plan Catalog or the Audit again to refresh the test Catalog.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone, queueTimeZone) {
   const value = key => {
     const column = mapping[key];
     return column === undefined ? '' : renewal[column];
@@ -201,8 +274,8 @@ function transformRow_(row, ix, renewal, mapping, planRules, renewalTimeZone) {
   const plan = resolvePlan_(String(value('new_period') || ''), planRules);
   const period = plan.period || String(value('new_period') || '');
   setByPrefix_(row, ix, '付款起始日', '');
-  setByPrefix_(row, ix, '合約起始日', dateOnlyForQueue_(value('new_start'), renewalTimeZone));
-  setByPrefix_(row, ix, '合約結束日', dateOnlyForQueue_(value('new_end'), renewalTimeZone));
+  setByPrefix_(row, ix, '合約起始日', dateOnlyForQueue_(value('new_start'), renewalTimeZone, queueTimeZone));
+  setByPrefix_(row, ix, '合約結束日', dateOnlyForQueue_(value('new_end'), renewalTimeZone, queueTimeZone));
   setByPrefix_(row, ix, '解約日', '');
   setByPrefix_(row, ix, 'Long-Term Contract Notes', value('long_term'));
   setByPrefix_(row, ix, 'TMS Plan Type', value('tms_plan_type'));
@@ -260,17 +333,21 @@ function writeQueue_(sheet, headers, rows, ix) {
   if (rows.length) sheet.getRange(2, 1, rows.length, headers.length)
     .setValues(rows.map(r => r.slice(0, headers.length).concat(Array(Math.max(0, headers.length - r.length)).fill(''))));
   const check = requiredHeader_(ix, 'Check', 'Queue') + 1;
+  const contractStart = requiredHeader_(ix, '合約起始日', 'Queue', true) + 1;
+  const contractEnd = requiredHeader_(ix, '合約結束日', 'Queue', true) + 1;
   const bonus = requiredHeader_(ix, '合約贈送組數', 'Queue', true) + 1;
   const overage = requiredHeader_(ix, '超額每組單價', 'Queue', true) + 1;
   if (rows.length) {
     sheet.getRange(2, check, rows.length, 1).clearDataValidations().insertCheckboxes();
+    sheet.getRange(2, contractStart, rows.length, 1).setNumberFormat('yyyy-mm-dd');
+    sheet.getRange(2, contractEnd, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sheet.getRange(2, bonus, rows.length, 1).setNumberFormat('0.00');
     sheet.getRange(2, overage, rows.length, 1).setNumberFormat('0.000');
   }
 }
 
-function appendAudit_(sheet, batchId, month, count, missingTpr, missingRenewal) {
-  sheet.appendRow([new Date(), batchId, month, 'Build Queue', count, missingTpr.join(', '), missingRenewal.join(', '), 'Test only; no formal TPR writeback']);
+function appendAudit_(sheet, batchId, month, count, missingTpr, missingRenewal, operation) {
+  sheet.appendRow([new Date(), batchId, month, operation || 'Build Queue', count, missingTpr.join(', '), missingRenewal.join(', '), 'Test only; no formal TPR writeback']);
 }
 // Alerts pause a script until a person closes the dialog.  That is unsuitable
 // for the full Queue/audit run, because it can make an otherwise completed
@@ -300,12 +377,13 @@ function zeroNumberAsBlank_(v) {
   const value = numberOrBlank_(v);
   return value === 0 ? '' : value;
 }
-function dateOnlyForQueue_(value, sourceTimeZone) {
+function dateOnlyForQueue_(value, sourceTimeZone, destinationTimeZone) {
   if (!(value instanceof Date) || isNaN(value.getTime())) return value;
-  const parts = Utilities.formatDate(value, sourceTimeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd')
-    .split('-').map(Number);
-  // Use a UTC date-only value so writing between spreadsheets cannot subtract the source time-zone offset.
-  return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  const dateText = Utilities.formatDate(value, sourceTimeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  // A Sheets date is local midnight in the destination spreadsheet. Parsing
+  // the source Y-M-D in that time zone keeps the stored value date-only and
+  // avoids the hidden 08:00 produced by writing UTC midnight to Asia/Taipei.
+  return Utilities.parseDate(dateText, destinationTimeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 function periodMonths_(period) {
   const p = String(period).toLowerCase();
@@ -378,8 +456,9 @@ function runContractAudit() {
   setupAuditSheets_(ss, queue);
 
   const controlSheet = ss.getSheetByName('Control');
-  ensureBonusAuditSettings_(controlSheet);
+  ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
   const control = readSettings_(controlSheet);
+  const catalogSync = syncPlanCatalog_(ss, control);
   const queueValues = queue.getDataRange().getValues();
   const queueHeaders = queueValues[0].map(String);
   const qx = headerIndex_(queueHeaders);
@@ -393,14 +472,25 @@ function runContractAudit() {
 
   const rows = queueValues.slice(1).map((values, i) => ({ row: i + 2, values }));
   const byBranch = groupBy_(rows, r => auditText_(auditGet_(r.values, qx, 'Branch ID')));
+  const origins = loadLegacyBranchOrigins_(ss, control, Object.keys(byBranch));
   const shareOverageSource = shareOverageSourceAudit_(ss, control, byBranch, qx);
-  const evidence = indexedReview_(ss.getSheetByName('Contract Evidence Review'), 'Branch ID');
-  const plans = indexedReview_(ss.getSheetByName('Plan Classification Review'), 'Branch ID');
+  const activeContractReviewBatchId = auditText_(control['Active Contract Review Batch ID']);
+  const evidence = indexedEvidenceReviews_(
+    ss.getSheetByName('Contract Evidence Review'), 'Branch ID', Object.keys(byBranch),
+    activeContractReviewBatchId
+  );
+  const planReviewSheet = ss.getSheetByName('Plan Classification Review');
+  const plans = indexedPlanClassificationReviews_(
+    planReviewSheet, 'Branch ID', Object.keys(byBranch), activeContractReviewBatchId
+  );
   const approvals = indexedReview_(ss.getSheetByName('Special Approval Review'), 'Branch ID');
   const shares = indexedReview_(ss.getSheetByName('Share Group Review'), 'Share Plan ID');
   const bonusReference = loadRsvBonusReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const familyReference = loadRsvFamilyReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const resultRows = [];
+  const documentMatchTraces = [];
+  const planClassificationTraces = [];
+  const affectedCatalogChanges = {};
   let readyBranches = 0;
 
   Object.keys(byBranch).forEach(branchId => {
@@ -410,23 +500,57 @@ function runContractAudit() {
     const comparison = classifyAction_(oldRows, queueRows, tx, qx, shareOverage);
     const action = comparison.action;
     const planChange = comparison.planChange;
-    const ev = evidence[branchId] || {};
-    const plan = plans[branchId] || {};
+    const evidenceEntry = evidence[branchId] || null;
+    const ev = evidenceEntry ? evidenceEntry.review : {};
+    const planEntry = plans[branchId] || null;
+    const plan = planEntry ? planEntry.review : {};
     const approval = approvals[branchId] || {};
     const share = shareAudit_(queueRows, qx, shares, shareOverage);
     const renewalDataMissing = queueRows.some(r => auditText_(auditGet_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
     const billing = billingCycleAudit_(ev, queueRows, qx);
-    const contract = contractAudit_(ev, planChange, billing, queueRows, qx, control, comparison.reason);
+    let documentMatch = structuredDocumentMatchAudit_(ev, queueRows, qx);
+    if (evidenceEntry && evidenceEntry.currentBatchMode && documentMatch.result === 'NO_STRUCTURED_DATA') {
+      const reason = '目前 Active Contract Review Batch「' + evidenceEntry.reviewBatchId + '」row ' +
+        evidenceEntry.rowNumber + ' 已進入 structured review，但 Structured Review Version／' +
+        'Structured Contract Data 缺失；不得 fallback 到 historical Full Plan Match';
+      documentMatch = { result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason };
+    }
+    const contractReview = structuredReviewForProtectedGates_(ev, documentMatch);
+    const contract = contractAudit_(contractReview, documentMatch, planChange, billing, queueRows, qx, control, comparison.reason);
+    if (evidenceEntry && evidenceEntry.targetRowNumber !== null) {
+      documentMatchTraces.push(Object.assign({}, documentMatch, {
+        branchId,
+        targetRowNumber:evidenceEntry.targetRowNumber,
+        reviewBatchId:evidenceEntry.reviewBatchId,
+        expectedStructuredReviewVersion:auditText_(ev['Structured Review Version']),
+        expectedStructuredContractData:auditText_(ev['Structured Contract Data'])
+      }));
+    }
     const bonus = bonusCountAudit_(queueRows, qx, bonusReference, control);
-    const inferredFamilies = {
-      oldFamily: inferRsvPlanFamily_(oldRows, tx, familyReference, shareOverage),
-      newFamily: inferRsvPlanFamily_(queueRows.map(r => r.values), qx, familyReference, shareOverage)
+    const origin = origins[branchId] || {};
+    const oldPlan = inferRsvPlan_(oldRows, tx, familyReference, shareOverage, origin, { mode:'original' });
+    const expectedNewFamily = oldPlan.family === 'Special'
+      ? (origin.listed ? 'Public' : 'BD New')
+      : oldPlan.family;
+    const inferredPlans = {
+      oldPlan,
+      newPlan: inferRsvPlan_(queueRows.map(r => r.values), qx, familyReference, shareOverage, origin, {
+        mode:'renewal', expectedFamily:expectedNewFamily
+      })
     };
-    const planAudit = planComplianceAudit_(plan, planChange, inferredFamilies);
+    const planAudit = planComplianceAudit_(plan, planChange, inferredPlans, origin);
     const special = specialApprovalAudit_(planAudit, approval, hasNonFullYearAnnualRenewal_(queueRows, qx));
+    const catalogChange = pendingCatalogChangeAudit_(oldRows, queueRows, tx, qx, catalogSync.pendingChanges, branchId, planAudit);
+    (catalogChange.changeIds || []).forEach(changeId => {
+      if (!affectedCatalogChanges[changeId]) affectedCatalogChanges[changeId] = new Set();
+      affectedCatalogChanges[changeId].add(branchId);
+    });
     const sourceDates = originalTprDateAudit_(oldRows, queueRows, tx, qx);
     const longTerm = longTermContractAudit_(queueRows, qx, ev);
-    const decision = decideAuditStatus_(renewalDataMissing, sourceDates, longTerm, contract, bonus, planAudit, special, share);
+    const decision = appendPlanDecisionReason_(
+      decideAuditStatus_(renewalDataMissing, catalogChange, sourceDates, longTerm, contract, bonus, planAudit, special, share),
+      planAudit
+    );
     if (decision.status === 'Ready') readyBranches++;
 
     queueRows.forEach(r => {
@@ -452,18 +576,36 @@ function runContractAudit() {
       auditSet_(output, qx, 'Reviewed At', new Date());
       resultRows.push(output);
     });
+    if (planEntry) {
+      planClassificationTraces.push({
+        branchId,
+        targetRowNumber:planEntry.targetRowNumber,
+        reviewBatchId:planEntry.reviewBatchId,
+        origin,
+        planAudit
+      });
+    }
   });
+
+  recordPlanChangeAffectedBranches_(ss.getSheetByName('Plan Catalog Change Review'), affectedCatalogChanges);
+  writePlanClassificationTraces_(
+    planReviewSheet, planClassificationTraces, activeContractReviewBatchId
+  );
+  writeDocumentMatchTraces_(
+    ss.getSheetByName('Contract Evidence Review'), documentMatchTraces,
+    activeContractReviewBatchId
+  );
 
   queue.getRange(2, 1, resultRows.length, queueHeaders.length).setValues(resultRows);
   queue.getRange(2, requiredHeader_(qx, 'Check', 'Queue') + 1, resultRows.length, 1)
     .clearDataValidations().insertCheckboxes();
-  appendAudit_(ss.getSheetByName('Audit Log'), 'AUDIT-' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyyMMdd-HHmmss'), '', resultRows.length, [], []);
+  appendAudit_(ss.getSheetByName('Audit Log'), 'AUDIT-' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyyMMdd-HHmmss'), '', resultRows.length, [], [], 'Contract Audit');
   notify_('Contract audit completed. Ready branches: ' + readyBranches + ' / ' + Object.keys(byBranch).length +
     '. Review tabs must explicitly confirm document, plan, special approval and Share evidence before Check can be TRUE.');
 }
 
 function setupAuditSheets_(ss, queue) {
-  ensureReviewSheet_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS);
+  const evidenceSheet = ensureReviewSheetHeadersByName_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Plan Classification Review', PLAN_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Special Approval Review', SPECIAL_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Share Group Review', SHARE_REVIEW_HEADERS);
@@ -476,21 +618,487 @@ function setupAuditSheets_(ss, queue) {
     if (!id) return;
     if (!branches[id]) branches[id] = auditText_(auditGet_(r, ix, '合約'));
   });
-  appendMissingReviewRows_(ss.getSheetByName('Contract Evidence Review'), Object.keys(branches), id => [id, branches[id]]);
+  appendMissingEvidenceReviewRows_(evidenceSheet, branches);
   appendMissingReviewRows_(ss.getSheetByName('Plan Classification Review'), Object.keys(branches), id => [id]);
   appendMissingReviewRows_(ss.getSheetByName('Special Approval Review'), Object.keys(branches), id => [id]);
   const shareIds = [...new Set(values.slice(1).map(r => auditText_(auditGet_(r, ix, 'Share Plan ID'))).filter(Boolean))];
   appendMissingReviewRows_(ss.getSheetByName('Share Group Review'), shareIds, id => [id]);
 }
 
-function ensureBonusAuditSettings_(sheet) {
+function ensureSettings_(sheet, settings) {
   if (!sheet) throw new Error('Control sheet was not found.');
   const values = sheet.getDataRange().getValues();
   const existing = new Set(values.slice(1).map(r => auditText_(r[0])).filter(Boolean));
-  const missing = BONUS_AUDIT_SETTINGS.filter(r => !existing.has(r[0]));
+  const missing = settings.filter(r => !existing.has(r[0]));
   if (missing.length) {
     sheet.getRange(sheet.getLastRow() + 1, 1, missing.length, 3).setValues(missing);
   }
+}
+
+function syncPlanCatalog_(ss, control) {
+  const sourceSpreadsheetId = auditText_(control['RSV Plan Reference Spreadsheet ID']);
+  const sourceTab = auditText_(control['RSV Plan Reference Tab']);
+  const codeHeader = auditText_(control['RSV Plan Code Header']) || 'Plan Code';
+  if (!sourceSpreadsheetId || !sourceTab) throw new Error('RSV plan-reference source is not configured.');
+
+  const sourceSheet = SpreadsheetApp.openById(sourceSpreadsheetId).getSheetByName(sourceTab);
+  if (!sourceSheet) throw new Error('RSV plan-reference tab was not found: ' + sourceTab);
+  const sourcePlans = readPlanCatalogSource_(sourceSheet, sourceSpreadsheetId, sourceTab, codeHeader);
+  const catalogSheet = ensureReviewSheet_(ss, 'Canonical Plan Catalog', CANONICAL_PLAN_HEADERS);
+  const changeSheet = ensureReviewSheet_(ss, 'Plan Catalog Change Review', PLAN_CHANGE_HEADERS);
+  const existingCatalog = readTable_(catalogSheet);
+  const existingChanges = readTable_(changeSheet);
+  const now = new Date();
+
+  if (!existingCatalog.length) {
+    const baseline = sourcePlans.map(plan => canonicalPlanRowObject_(plan, 1, 'Active', now, '', now));
+    replaceManagedTable_(catalogSheet, CANONICAL_PLAN_HEADERS, baseline.map(objectRow_(CANONICAL_PLAN_HEADERS)));
+    syncPlanReferenceMapping_(ss.getSheetByName('Plan Reference Mapping'), sourceSpreadsheetId, sourceTab, codeHeader);
+    syncPlanReferenceSnapshot_(ss.getSheetByName('Plan Reference Snapshot'), baseline);
+    return { activePlans: baseline, pendingChanges: [] };
+  }
+
+  const catalog = existingCatalog.map(normalizeCanonicalPlanRow_).filter(Boolean);
+  const changes = existingChanges.map(normalizePlanChangeRow_).filter(Boolean);
+  const latestByCode = {};
+  catalog.forEach(row => {
+    if (!latestByCode[row.planCode] || row.version > latestByCode[row.planCode].version) latestByCode[row.planCode] = row;
+  });
+  const sourceByCode = {};
+  sourcePlans.forEach(plan => { sourceByCode[plan.planCode] = plan; });
+  const pending = [];
+
+  sourcePlans.forEach(plan => {
+    const prior = latestByCode[plan.planCode];
+    if (!prior) {
+      const added = canonicalPlanRowObject_(plan, 1, 'Active', now, '', now);
+      catalog.push(added);
+      latestByCode[plan.planCode] = added;
+      upsertPlanChangeObject_(changes, {
+        changeId: planChangeId_(plan.planCode, 'Add', '', planRecordJson_(plan)),
+        planCode: plan.planCode,
+        changeType: 'Add',
+        detectedAt: now,
+        oldVersion: '',
+        oldValuesJson: '',
+        newValuesJson: planRecordJson_(plan),
+        approvalStatus: 'Auto Approved',
+        reviewer: 'System',
+        reviewedAt: now,
+        notes: '新增方案自動建立永久 Plan Code。',
+        affectedBranchIds: '',
+        appliedAt: now
+      });
+      return;
+    }
+
+    prior.sourceRow = plan.sourceRow;
+    if (planRecordJson_(prior) === planRecordJson_(plan) && prior.status === 'Active') return;
+    const oldJson = planRecordJson_(prior);
+    const newJson = planRecordJson_(plan);
+    const changeId = planChangeId_(plan.planCode, 'Modify', oldJson, newJson);
+    const change = upsertPlanChangeObject_(changes, {
+      changeId,
+      planCode: plan.planCode,
+      changeType: 'Modify',
+      detectedAt: now,
+      oldVersion: prior.version,
+      oldValuesJson: oldJson,
+      newValuesJson: newJson,
+      approvalStatus: 'Pending',
+      reviewer: '', reviewedAt: '', notes: '', affectedBranchIds: '', appliedAt: ''
+    });
+    if (planChangeApproved_(change)) {
+      prior.status = 'Superseded';
+      prior.effectiveTo = now;
+      const next = canonicalPlanRowObject_(plan, prior.version + 1, 'Active', now, '', now);
+      catalog.push(next);
+      latestByCode[plan.planCode] = next;
+      change.appliedAt = change.appliedAt || now;
+    } else {
+      pending.push(change);
+    }
+  });
+
+  Object.keys(latestByCode).forEach(planCode => {
+    const prior = latestByCode[planCode];
+    if (sourceByCode[planCode] || prior.status !== 'Active') return;
+    const oldJson = planRecordJson_(prior);
+    const changeId = planChangeId_(planCode, 'Deactivate', oldJson, '');
+    const change = upsertPlanChangeObject_(changes, {
+      changeId,
+      planCode,
+      changeType: 'Deactivate',
+      detectedAt: now,
+      oldVersion: prior.version,
+      oldValuesJson: oldJson,
+      newValuesJson: '',
+      approvalStatus: 'Pending',
+      reviewer: '', reviewedAt: '', notes: '', affectedBranchIds: '', appliedAt: ''
+    });
+    if (planChangeApproved_(change)) {
+      prior.status = 'Inactive';
+      prior.effectiveTo = now;
+      change.appliedAt = change.appliedAt || now;
+    } else {
+      pending.push(change);
+    }
+  });
+
+  replaceManagedTable_(catalogSheet, CANONICAL_PLAN_HEADERS,
+    catalog.sort((a, b) => a.planCode.localeCompare(b.planCode) || a.version - b.version)
+      .map(objectRow_(CANONICAL_PLAN_HEADERS)));
+  replaceManagedTable_(changeSheet, PLAN_CHANGE_HEADERS,
+    changes.sort((a, b) => auditText_(a.detectedAt).localeCompare(auditText_(b.detectedAt)))
+      .map(objectRow_(PLAN_CHANGE_HEADERS)));
+  const active = catalog.filter(row => row.status === 'Active');
+  syncPlanReferenceMapping_(ss.getSheetByName('Plan Reference Mapping'), sourceSpreadsheetId, sourceTab, codeHeader);
+  syncPlanReferenceSnapshot_(ss.getSheetByName('Plan Reference Snapshot'), active);
+  return { activePlans: active, pendingChanges: pending };
+}
+
+function readPlanCatalogSource_(sheet, spreadsheetId, sourceSheet, codeHeader) {
+  const snapshot = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  const analysis = analyzePlanSourceSnapshot_(snapshot, spreadsheetId);
+  assertValidPlanSourceAnalysis_(analysis);
+  if (analysis.missingPlanCodes.length) {
+    throw new Error('TMS plan source contains supported rows without Plan Code: ' +
+      analysis.missingPlanCodes.map(item => item.description).join('；') +
+      '。請先明確執行 maintainPlanCodes()。');
+  }
+  if (!analysis.plans.length) throw new Error('TMS plan source contains no supported Public／BD New RSV／RwG plans.');
+  return analysis.plans;
+}
+
+function assignMissingPlanCodes_(sheet, spreadsheetId, sourceSheet, codeHeader) {
+  const initial = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  const initialAnalysis = analyzePlanSourceSnapshot_(initial, spreadsheetId);
+  assertValidPlanSourceAnalysis_(initialAnalysis);
+  if (!initialAnalysis.missingPlanCodes.length) return { assignments:[] };
+
+  const latest = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  if (planSourceSnapshotSignature_(latest) !== planSourceSnapshotSignature_(initial)) {
+    throw new Error('TMS plan source changed during Plan Code maintenance preflight; zero writes performed.');
+  }
+  const latestAnalysis = analyzePlanSourceSnapshot_(latest, spreadsheetId);
+  assertValidPlanSourceAnalysis_(latestAnalysis);
+  const usedCodes = latest.values.map(row => auditText_(row[latest.codeColumn])).filter(Boolean);
+  let next = usedCodes.reduce((max, code) => {
+    const match = code.match(/^TMS-(\d+)$/i);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0) + 1;
+  const assignments = latestAnalysis.missingPlanCodes.map(item => ({
+    rowNumber:item.rowNumber,
+    planCode:'TMS-' + ('0000' + next++).slice(-4)
+  }));
+
+  assignments.forEach(item => {
+    sheet.getRange(item.rowNumber, latest.codeColumn + 1).setValue(item.planCode);
+  });
+
+  const verified = planSourceSnapshot_(sheet, sourceSheet, codeHeader);
+  const verifiedAnalysis = analyzePlanSourceSnapshot_(verified, spreadsheetId);
+  assertValidPlanSourceAnalysis_(verifiedAnalysis);
+  if (verifiedAnalysis.missingPlanCodes.length) {
+    throw new Error('Plan Code maintenance read-back failed; supported rows remain blank: ' +
+      verifiedAnalysis.missingPlanCodes.map(item => item.description).join('；'));
+  }
+  latest.values.forEach((row, index) => {
+    const priorCode = auditText_(row[latest.codeColumn]);
+    if (!priorCode) return;
+    const actualCode = auditText_(verified.values[index][verified.codeColumn]);
+    if (actualCode !== priorCode) {
+      throw new Error(sourceSheet + '!' + (index + 2) + ' existing Plan Code changed during maintenance: ' +
+        priorCode + ' → ' + actualCode);
+    }
+  });
+  assignments.forEach(item => {
+    const actualCode = auditText_(verified.values[item.rowNumber - 2][verified.codeColumn]);
+    if (actualCode !== item.planCode) {
+      throw new Error(sourceSheet + '!' + item.rowNumber + ' Plan Code read-back mismatch: expected ' +
+        item.planCode + ', actual ' + (actualCode || 'blank'));
+    }
+  });
+  return { assignments };
+}
+
+function planSourceSnapshot_(sheet, sourceSheet, codeHeader) {
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn < 1) throw new Error('TMS plan source has no header row.');
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(String);
+  const codeColumn = headers.findIndex(header => norm_(header) === norm_(codeHeader));
+  if (codeColumn < 0) throw new Error('TMS plan source is missing required Plan Code header: ' + codeHeader);
+  const ix = headerIndex_(headers);
+  const columns = {
+    catalog: requiredHeader_(ix, 'Source Tab', 'TMS plan source'),
+    billing: requiredHeader_(ix, '繳款週期', 'TMS plan source'),
+    product: requiredHeader_(ix, '產品', 'TMS plan source'),
+    sets: requiredHeader_(ix, '使用組數', 'TMS plan source'),
+    bonus: requiredHeader_(ix, '贈送組數', 'TMS plan source'),
+    price: requiredHeader_(ix, '月費 / 年費', 'TMS plan source'),
+    overage: requiredHeader_(ix, '每組超額單價', 'TMS plan source')
+  };
+  const rowCount = Math.max(0, sheet.getLastRow() - 1);
+  if (!rowCount) throw new Error('TMS plan source has no data rows.');
+  return {
+    sourceSheet, headers, codeColumn, columns,
+    values:sheet.getRange(2, 1, rowCount, lastColumn).getValues()
+  };
+}
+
+function analyzePlanSourceSnapshot_(snapshot, spreadsheetId) {
+  const usedCodes = snapshot.values.map(row => auditText_(row[snapshot.codeColumn])).filter(Boolean);
+  const duplicates = usedCodes.filter((code, index) => usedCodes.indexOf(code) !== index);
+  const plans = [];
+  const invalidRows = [];
+  const missingPlanCodes = [];
+  snapshot.values.forEach((row, index) => {
+    const columns = snapshot.columns;
+    const sourceCatalog = auditText_(row[columns.catalog]);
+    const family = sourceCatalog === 'BD 新方案' ? 'BD New' :
+      ['公版方案', 'Lite 方案', 'Email Only 方案'].includes(sourceCatalog) ? 'Public' : '';
+    if (!family) return;
+    const billing = referenceBillingPeriod_(row[columns.billing]);
+    const productText = auditText_(row[columns.product]).toLowerCase();
+    const product = productText === 'rwg' ? 'RwG' : productText === 'rsv' ? 'RSV' : '';
+    const sets = referenceReservationSets_(row[columns.sets]);
+    const price = auditNumber_(row[columns.price]);
+    const problems = [];
+    if (!billing) problems.push('繳款週期「' + (auditText_(row[columns.billing]) || '空白') + '」目前不支援（僅 monthly／annual）');
+    if (!product) problems.push('產品「' + (auditText_(row[columns.product]) || '空白') + '」目前不支援（僅 RSV／RwG）');
+    if (sets === null) problems.push('使用組數空白或無法判讀');
+    if (price === null) problems.push('月費 / 年費空白或無法判讀');
+    if (problems.length) {
+      invalidRows.push(sourcePlanFactDescription_(snapshot.sourceSheet, index + 2, row, columns) +
+        '：' + problems.join('、'));
+      return;
+    }
+    const planCode = auditText_(row[snapshot.codeColumn]);
+    if (!planCode) {
+      missingPlanCodes.push({
+        rowNumber:index + 2,
+        description:sourcePlanFactDescription_(snapshot.sourceSheet, index + 2, row, columns)
+      });
+      return;
+    }
+    plans.push({
+      planCode, family, sourceCatalog, billing, product, sets,
+      bonus: auditNumber_(row[columns.bonus]) === null ? 0 : auditNumber_(row[columns.bonus]),
+      price, overage: auditNumber_(row[columns.overage]),
+      sourceSpreadsheetId: spreadsheetId, sourceSheet:snapshot.sourceSheet, sourceRow:index + 2
+    });
+  });
+  return { plans, invalidRows, missingPlanCodes, duplicates:[...new Set(duplicates)] };
+}
+
+function assertValidPlanSourceAnalysis_(analysis) {
+  if (analysis.duplicates.length) {
+    throw new Error('Duplicate Plan Code in TMS plan source: ' + analysis.duplicates.join(', '));
+  }
+  if (analysis.invalidRows.length) {
+    throw new Error('TMS plan source contains invalid official Catalog rows: ' +
+      analysis.invalidRows.join('；'));
+  }
+}
+
+function planSourceSnapshotSignature_(snapshot) {
+  return JSON.stringify({ headers:snapshot.headers, values:snapshot.values });
+}
+
+function sourcePlanFactDescription_(sourceSheet, rowNumber, row, columns) {
+  return sourceSheet + '!' + rowNumber + '（' + [
+    'Source Tab=' + (auditText_(row[columns.catalog]) || '空白'),
+    '繳款週期=' + (auditText_(row[columns.billing]) || '空白'),
+    '產品=' + (auditText_(row[columns.product]) || '空白'),
+    '使用組數=' + (auditText_(row[columns.sets]) || '空白'),
+    '贈送組數=' + (auditText_(row[columns.bonus]) || '空白'),
+    '月費 / 年費=' + (auditText_(row[columns.price]) || '空白'),
+    '每組超額單價=' + (auditText_(row[columns.overage]) || '空白')
+  ].join('、') + '）';
+}
+
+function canonicalPlanRowObject_(plan, version, status, effectiveFrom, effectiveTo, importedAt) {
+  return {
+    planCode: plan.planCode, version, status, family: plan.family,
+    sourceCatalog: plan.sourceCatalog, billing: plan.billing, product: plan.product,
+    sets: plan.sets, bonus: plan.bonus, price: plan.price, overage: plan.overage,
+    sourceSpreadsheetId: plan.sourceSpreadsheetId, sourceSheet: plan.sourceSheet,
+    sourceRow: plan.sourceRow, effectiveFrom, effectiveTo, importedAt,
+    recordJson: planRecordJson_(plan)
+  };
+}
+
+function normalizeCanonicalPlanRow_(row) {
+  const planCode = auditText_(row['Plan Code']);
+  if (!planCode) return null;
+  return {
+    planCode, version: Number(row['Version'] || 1), status: auditText_(row['Status']),
+    family: normalPlanFamily_(row['Plan Family']), sourceCatalog: auditText_(row['Source Catalog']),
+    billing: referenceBillingPeriod_(row['Billing Period']), product: auditText_(row['Product']),
+    sets: referenceReservationSets_(row['Usage Sets']),
+    bonus: auditNumber_(row['Bonus Sets']) === null ? 0 : auditNumber_(row['Bonus Sets']),
+    price: auditNumber_(row['Price']), overage: auditNumber_(row['Overage Unit Price']),
+    sourceSpreadsheetId: auditText_(row['Source Spreadsheet ID']), sourceSheet: auditText_(row['Source Sheet']),
+    sourceRow: Number(row['Source Row'] || 0), effectiveFrom: row['Effective From'], effectiveTo: row['Effective To'],
+    importedAt: row['Imported At'], recordJson: auditText_(row['Record JSON'])
+  };
+}
+
+function planRecordJson_(plan) {
+  return JSON.stringify({
+    family: plan.family, sourceCatalog: plan.sourceCatalog, billing: plan.billing,
+    product: plan.product, sets: plan.sets, bonus: plan.bonus,
+    price: plan.price, overage: plan.overage
+  });
+}
+
+function normalizePlanChangeRow_(row) {
+  const changeId = auditText_(row['Change ID']);
+  if (!changeId) return null;
+  return {
+    changeId, planCode: auditText_(row['Plan Code']), changeType: auditText_(row['Change Type']),
+    detectedAt: row['Detected At'], oldVersion: row['Old Version'], oldValuesJson: auditText_(row['Old Values JSON']),
+    newValuesJson: auditText_(row['New Values JSON']), approvalStatus: auditText_(row['Approval Status']),
+    reviewer: auditText_(row['Reviewer']), reviewedAt: row['Reviewed At'], notes: auditText_(row['Notes']),
+    affectedBranchIds: auditText_(row['Affected Branch IDs']), appliedAt: row['Applied At']
+  };
+}
+
+function upsertPlanChangeObject_(changes, defaults) {
+  let row = changes.find(change => change.changeId === defaults.changeId);
+  if (!row) {
+    row = defaults;
+    changes.push(row);
+    return row;
+  }
+  ['planCode', 'changeType', 'oldVersion', 'oldValuesJson', 'newValuesJson'].forEach(key => { row[key] = defaults[key]; });
+  return row;
+}
+
+function planChangeApproved_(change) {
+  return auditText_(change.approvalStatus).toLowerCase() === 'approved' &&
+    !!auditText_(change.reviewer) && !!change.reviewedAt;
+}
+
+function planChangeId_(planCode, type, oldJson, newJson) {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, type + '|' + oldJson + '|' + newJson)
+    .slice(0, 6).map(byte => ('0' + ((byte + 256) % 256).toString(16)).slice(-2)).join('');
+  return 'PLANCHANGE-' + planCode + '-' + digest;
+}
+
+function objectRow_(headers) {
+  const keys = {
+    'Plan Code':'planCode','Version':'version','Status':'status','Plan Family':'family','Source Catalog':'sourceCatalog',
+    'Billing Period':'billing','Product':'product','Usage Sets':'sets','Bonus Sets':'bonus','Price':'price',
+    'Overage Unit Price':'overage','Source Spreadsheet ID':'sourceSpreadsheetId','Source Sheet':'sourceSheet',
+    'Source Row':'sourceRow','Effective From':'effectiveFrom','Effective To':'effectiveTo','Imported At':'importedAt','Record JSON':'recordJson',
+    'Change ID':'changeId','Change Type':'changeType','Detected At':'detectedAt','Old Version':'oldVersion',
+    'Old Values JSON':'oldValuesJson','New Values JSON':'newValuesJson','Approval Status':'approvalStatus',
+    'Reviewer':'reviewer','Reviewed At':'reviewedAt','Notes':'notes','Affected Branch IDs':'affectedBranchIds','Applied At':'appliedAt'
+  };
+  return object => headers.map(header => object[keys[header]] === undefined ? '' : object[keys[header]]);
+}
+
+function replaceManagedTable_(sheet, headers, rows) {
+  const clearRows = Math.max(sheet.getLastRow() - 1, rows.length);
+  if (clearRows > 0) sheet.getRange(2, 1, clearRows, headers.length).clearContent();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  sheet.setFrozenRows(1);
+}
+
+function syncPlanReferenceMapping_(sheet, sourceSpreadsheetId, sourceTab, codeHeader) {
+  if (!sheet) throw new Error('Plan Reference Mapping sheet was not found.');
+  const preserved = readTable_(sheet)
+    .filter(row => !/^Plan\.RSV(?:\.|$)/i.test(auditText_(row['Mapping ID'])))
+    .map(row => PLAN_REFERENCE_MAPPING_HEADERS.map(header => row[header] === undefined ? '' : row[header]));
+  const common = ['RSV Public / RSV BD New', sourceSpreadsheetId, sourceTab, 'Row package', 1, 2, ''];
+  const rows = [
+    ['Plan.RSV.SourceCatalog'].concat(common, ['Source Tab', 'source_catalog', 'text', '公版方案 = Public；BD 新方案 = BD New', 'Yes', 'Yes', 'Source Catalog 決定方案家族', 'Active', '每個來源列是一個不可拆分的完整方案']),
+    ['Plan.RSV.PlanCode'].concat(common, [codeHeader, 'plan_code', 'text', '永久代碼；既有方案不得換碼', 'No', 'No', 'No', 'Active', '新增方案才建立新 Plan Code；異動沿用原代碼並建立新版本']),
+    ['Plan.RSV.Billing'].concat(common, ['繳款週期', 'billing_period', 'text', '目前支援 monthly／annual；6mo／3mo 需人工確認', 'Yes', 'Yes', 'No', 'Active', '']),
+    ['Plan.RSV.Product'].concat(common, ['產品', 'product', 'text', '目前支援 RSV／RwG', 'Yes', 'Yes', 'No', 'Active', '']),
+    ['Plan.RSV.Usage'].concat(common, ['使用組數', 'usage_sets', 'number', 'unlimited 保留為 unlimited', 'Yes', 'Yes', 'No', 'Active', '']),
+    ['Plan.RSV.Bonus'].concat(common, ['贈送組數', 'free_reservations', 'number', 'blank = 0', 'Yes', 'Yes', 'No', 'Active', '']),
+    ['Plan.RSV.Price'].concat(common, ['月費 / 年費', 'plan_price', 'currency', '移除幣別與千分位', 'Yes', 'Yes', 'No', 'Active', '']),
+    ['Plan.RSV.Overage'].concat(common, ['每組超額單價', 'overage_unit_price', 'number', '保留小數', 'Yes', 'Yes', 'No', 'Active', ''])
+  ];
+  replaceManagedTable_(sheet, PLAN_REFERENCE_MAPPING_HEADERS, rows.concat(preserved));
+}
+
+function syncPlanReferenceSnapshot_(sheet, activePlans) {
+  if (!sheet) throw new Error('Plan Reference Snapshot sheet was not found.');
+  const headers = ['Snapshot ID','Plan Family','Source Spreadsheet ID','Source Tab','Source Row','Imported At','Raw Values JSON','Normalized Combination ID','Special Plan Flag'];
+  const existing = readTable_(sheet).filter(row => !/^RSV\b/i.test(auditText_(row['Plan Family'])));
+  const importedAt = new Date();
+  const rsvRows = activePlans.map(plan => [
+    plan.planCode + '-V' + plan.version,
+    plan.family === 'BD New' ? 'RSV BD New' : 'RSV Public',
+    plan.sourceSpreadsheetId, plan.sourceSheet, plan.sourceRow, importedAt,
+    JSON.stringify({ values: [plan.sourceCatalog, plan.billing, plan.product, plan.sets, plan.bonus, plan.price, plan.overage], sourceRows: [plan.sourceRow] }),
+    plan.planCode, ''
+  ]);
+  const preserved = existing.map(row => headers.map(header => row[header] === undefined ? '' : row[header]));
+  replaceManagedTable_(sheet, headers, rsvRows.concat(preserved));
+}
+
+function loadLegacyBranchOrigins_(ss, control, branchIds) {
+  const targetIds = [...new Set((branchIds || []).map(auditText_).filter(Boolean))];
+  const target = new Set(targetIds);
+  const sheetName = auditText_(control['Legacy Branch Master Tab']) || 'Legacy Branch Master';
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) throw new Error('Legacy Branch Master tab was not found: ' + sheetName);
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) throw new Error('Legacy Branch Master has no header row.');
+  const ix = headerIndex_(values[0].map(String));
+  const branchColumn = requiredHeader_(ix, control['Legacy Branch ID Header'] || 'Branch ID', sheetName);
+  const startColumn = findHeader_(ix, control['Legacy First Contract Date Header'] || 'first contract date');
+  const reasonColumn = findHeader_(ix, 'Reason') !== null ? findHeader_(ix, 'Reason') : findHeader_(ix, 'Notes');
+  const found = {};
+  values.slice(1).forEach((row, index) => {
+    const branchId = auditText_(row[branchColumn]);
+    if (!branchId || !target.has(branchId)) return;
+    if (!found[branchId]) found[branchId] = [];
+    found[branchId].push({
+      row: index + 2,
+      firstContractStart: startColumn === null ? null : dateFromCell_(row[startColumn]),
+      firstContractRaw: startColumn === null ? '' : auditText_(row[startColumn]),
+      reason: reasonColumn === null ? '' : auditText_(row[reasonColumn])
+    });
+  });
+  const out = {};
+  targetIds.forEach(branchId => {
+    const entries = found[branchId] || [];
+    if (entries.length) {
+      const rows = entries.map(entry => entry.row);
+      const dateDetails = entries.map(entry => entry.firstContractRaw || '空白').join('／');
+      const reasons = [...new Set(entries.map(entry => entry.reason).filter(Boolean))];
+      out[branchId] = {
+        listed: true,
+        duplicate: entries.length > 1,
+        conflict: entries.length > 1
+          ? 'Legacy Branch Master 的 Branch ID「' + branchId + '」重複出現在第 ' + rows.join('、') + ' 列（首約日：' + dateDetails + '），需人工整理名單'
+          : '',
+        firstContractStart: entries[0].firstContractStart,
+        firstContractRaw: entries[0].firstContractRaw,
+        status: entries.length > 1 ? 'Duplicate Legacy Membership' : 'Listed in Legacy Master',
+        sourceMode: 'Listed in Legacy Master',
+        source: sheetName + '!' + rows.join(',') + (reasons.length ? '；Reason：' + reasons.join('／') : '')
+      };
+      return;
+    }
+    out[branchId] = {
+      listed: false,
+      duplicate: false,
+      conflict: '',
+      firstContractStart: null,
+      firstContractRaw: '',
+      status: 'Not Listed in Legacy Master',
+      sourceMode: 'Not Listed in Legacy Master',
+      source: '不在 ' + sheetName + '；依舊方案完整組合判斷家族'
+    };
+  });
+  return out;
 }
 
 function ensureReviewSheet_(ss, name, headers) {
@@ -502,6 +1110,93 @@ function ensureReviewSheet_(ss, name, headers) {
     sheet.setFrozenRows(1);
   }
   return sheet;
+}
+
+/**
+ * Contract Evidence Review may contain columns from an older structured
+ * implementation.  Preserve every existing column and append only missing
+ * required headers after a duplicate/ambiguity preflight has passed.
+ */
+function ensureReviewSheetHeadersByName_(ss, name, requiredHeaders) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  const lastColumn = sheet.getLastColumn();
+  const headers = lastColumn ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0] : [];
+  const plan = headerNameMigrationPlan_(headers, requiredHeaders, name);
+  if (plan.missing.length) {
+    const requiredLastColumn = lastColumn + plan.missing.length;
+    if (requiredLastColumn > sheet.getMaxColumns()) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredLastColumn - sheet.getMaxColumns());
+    }
+    sheet.getRange(1, lastColumn + 1, 1, plan.missing.length).setValues([plan.missing]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function headerNameMigrationPlan_(headers, requiredHeaders, scope) {
+  const actualHeaders = headers.map(value => auditText_(value));
+  const requiredNames = requiredHeaders.map(value => auditText_(value));
+  const requiredByNormalized = {};
+  requiredNames.forEach(name => {
+    const key = norm_(name);
+    if (requiredByNormalized[key]) {
+      throw new Error(scope + ' required header definition is ambiguous: ' + name);
+    }
+    requiredByNormalized[key] = name;
+  });
+
+  const actualByNormalized = {};
+  actualHeaders.forEach((name, index) => {
+    if (!name) return;
+    const key = norm_(name);
+    (actualByNormalized[key] || (actualByNormalized[key] = [])).push({ name, index });
+  });
+
+  const positions = {};
+  const missing = [];
+  requiredNames.forEach(name => {
+    const matches = actualByNormalized[norm_(name)] || [];
+    if (matches.length > 1) {
+      throw new Error(scope + ' required header is duplicated: ' + name +
+        ' at columns ' + matches.map(match => match.index + 1).join(', '));
+    }
+    if (!matches.length) {
+      positions[name] = actualHeaders.length + missing.length;
+      missing.push(name);
+      return;
+    }
+    if (matches[0].name !== name) {
+      throw new Error(scope + ' header mapping is ambiguous: expected "' + name +
+        '", found "' + matches[0].name + '" at column ' + (matches[0].index + 1));
+    }
+    positions[name] = matches[0].index;
+  });
+  return { headers:actualHeaders.concat(missing), positions, missing };
+}
+
+function appendMissingEvidenceReviewRows_(sheet, branches) {
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) throw new Error(sheet.getName() + ' has no header row.');
+  const headers = values[0].map(String);
+  const rows = missingEvidenceReviewRows_(headers, values.slice(1), branches, sheet.getName());
+  if (!rows.length) return;
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+function missingEvidenceReviewRows_(headers, existingRows, branches, scope) {
+  const plan = headerNameMigrationPlan_(headers, EVIDENCE_REVIEW_HEADERS, scope);
+  if (plan.missing.length) {
+    throw new Error(scope + ' required headers were not appended before row creation: ' + plan.missing.join(', '));
+  }
+  const existing = new Set(existingRows.map(row => auditText_(row[plan.positions['Branch ID']])).filter(Boolean));
+  return Object.keys(branches).filter(id => !existing.has(id)).map(id => {
+    const row = headers.map(() => '');
+    row[plan.positions['Branch ID']] = id;
+    row[plan.positions['Evidence URL']] = branches[id];
+    row[plan.positions['Structured Review Version']] = '1';
+    return row;
+  });
 }
 
 function appendMissingReviewRows_(sheet, ids, makeRow) {
@@ -521,6 +1216,190 @@ function indexedReview_(sheet, keyHeader) {
     if (!id || out[id]) return;
     out[id] = values[0].reduce((o, h, i) => (o[String(h)] = row[i], o), {});
   });
+  return out;
+}
+
+function indexedPlanClassificationReviews_(sheet, keyHeader, relevantIds, activeBatchId) {
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return {};
+  const headers = values[0].map(String);
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [keyHeader];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(headers, requiredHeaders, sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' plan review index missing headers: ' + plan.missing.join(', '));
+  }
+  const keyColumn = plan.positions[keyHeader];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
+  const relevant = Array.isArray(relevantIds)
+    ? relevantIds.reduce((out, id) => (out[auditText_(id)] = true, out), {})
+    : null;
+  const entriesById = {};
+
+  values.slice(1).forEach((row, index) => {
+    const id = auditText_(row[keyColumn]);
+    if (!id || relevant && !relevant[id]) return;
+    if (!entriesById[id]) entriesById[id] = [];
+    entriesById[id].push({
+      rowNumber:index + 2,
+      review:headers.reduce((out, header, column) => (out[header] = row[column], out), {}),
+      reviewBatchId:batchColumn === null ? '' : auditText_(row[batchColumn])
+    });
+  });
+
+  const duplicateErrors = [];
+  const missingErrors = [];
+  const out = {};
+  const ids = currentBatchId
+    ? (relevant ? Object.keys(relevant) : Object.keys(entriesById).filter(id =>
+      entriesById[id].some(entry => entry.reviewBatchId === currentBatchId)))
+    : Object.keys(entriesById);
+  ids.forEach(id => {
+    const entries = entriesById[id] || [];
+    if (!currentBatchId) {
+      if (!entries.length) return;
+      const selected = entries[0];
+      out[id] = {
+        review:selected.review,
+        rowNumber:selected.rowNumber,
+        targetRowNumber:selected.rowNumber,
+        reviewBatchId:selected.reviewBatchId,
+        currentBatchMode:false
+      };
+      return;
+    }
+    const currentEntries = entries.filter(entry => entry.reviewBatchId === currentBatchId);
+    if (!currentEntries.length) {
+      missingErrors.push(id);
+      return;
+    }
+    if (currentEntries.length > 1) {
+      duplicateErrors.push(id + ' rows ' + currentEntries.map(entry => entry.rowNumber).join(', '));
+      return;
+    }
+    const selected = currentEntries[0];
+    out[id] = {
+      review:selected.review,
+      rowNumber:selected.rowNumber,
+      targetRowNumber:selected.rowNumber,
+      reviewBatchId:currentBatchId,
+      currentBatchMode:true
+    };
+  });
+  if (currentBatchId && (duplicateErrors.length || missingErrors.length)) {
+    const errors = [];
+    if (duplicateErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」有重複 Branch rows：' +
+        duplicateErrors.join('；'));
+    }
+    if (missingErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」缺少 Branch rows：' +
+        missingErrors.join(', '));
+    }
+    throw new Error(sheet.getName() + ' plan review identity failed: ' + errors.join('；'));
+  }
+  return out;
+}
+
+function indexedEvidenceReviews_(sheet, keyHeader, relevantIds, activeBatchId) {
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return {};
+  const headers = values[0].map(String);
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [keyHeader, 'Structured Review Version', 'Structured Contract Data'];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(headers, requiredHeaders, sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' evidence index missing headers: ' + plan.missing.join(', '));
+  }
+  const keyColumn = plan.positions[keyHeader];
+  const versionColumn = plan.positions['Structured Review Version'];
+  const dataColumn = plan.positions['Structured Contract Data'];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
+  const relevant = Array.isArray(relevantIds)
+    ? relevantIds.reduce((out, id) => (out[auditText_(id)] = true, out), {})
+    : null;
+  const entriesById = {};
+
+  values.slice(1).forEach((row, index) => {
+    const id = auditText_(row[keyColumn]);
+    if (!id || relevant && !relevant[id]) return;
+    if (!entriesById[id]) entriesById[id] = [];
+    entriesById[id].push({
+      rowNumber:index + 2,
+      review:headers.reduce((out, header, column) => (out[header] = row[column], out), {}),
+      reviewBatchId:batchColumn === null ? '' : auditText_(row[batchColumn]),
+      structuredIntent:auditText_(row[versionColumn]) !== '' || auditText_(row[dataColumn]) !== '',
+      activeStructured:auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== ''
+    });
+  });
+
+  const duplicateErrors = [];
+  const missingErrors = [];
+  const out = {};
+  const ids = currentBatchId
+    ? (relevant ? Object.keys(relevant) : Object.keys(entriesById).filter(id =>
+      entriesById[id].some(entry => entry.reviewBatchId === currentBatchId)))
+    : Object.keys(entriesById);
+  ids.forEach(id => {
+    const entries = entriesById[id];
+    if (currentBatchId) {
+      const currentEntries = (entries || []).filter(entry => entry.reviewBatchId === currentBatchId);
+      if (!currentEntries.length) {
+        missingErrors.push(id);
+        return;
+      }
+      if (currentEntries.length > 1) {
+        duplicateErrors.push(id + ' rows ' + currentEntries.map(entry => entry.rowNumber).join(', '));
+        return;
+      }
+      const selected = currentEntries[0];
+      out[id] = {
+        review:selected.review,
+        rowNumber:selected.rowNumber,
+        targetRowNumber:selected.activeStructured ? selected.rowNumber : null,
+        reviewBatchId:currentBatchId,
+        currentBatchMode:true,
+        structuredIntent:true
+      };
+      return;
+    }
+
+    const structured = entries.filter(entry => entry.activeStructured);
+    const structuredIntent = entries.filter(entry => entry.structuredIntent);
+    if (structured.length > 1) {
+      duplicateErrors.push(id + ' rows ' + structured.map(entry => entry.rowNumber).join(', '));
+      return;
+    }
+    const selected = structured.length === 1
+      ? structured[0]
+      : (structuredIntent.length ? structuredIntent[0] : entries[0]);
+    out[id] = {
+      review:selected.review,
+      rowNumber:selected.rowNumber,
+      targetRowNumber:structured.length === 1 ? selected.rowNumber : null,
+      reviewBatchId:selected.reviewBatchId,
+      currentBatchMode:false,
+      structuredIntent:selected.structuredIntent
+    };
+  });
+  if (!currentBatchId && duplicateErrors.length) {
+    throw new Error(sheet.getName() + ' has duplicate active structured review rows: ' +
+      duplicateErrors.join('；'));
+  }
+  if (currentBatchId && (duplicateErrors.length || missingErrors.length)) {
+    const errors = [];
+    if (duplicateErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」有重複 Branch rows：' +
+        duplicateErrors.join('；'));
+    }
+    if (missingErrors.length) {
+      errors.push('Active Contract Review Batch「' + currentBatchId + '」缺少 Branch rows：' +
+        missingErrors.join(', '));
+    }
+    throw new Error(sheet.getName() + ' evidence identity failed: ' + errors.join('；'));
+  }
   return out;
 }
 
@@ -547,8 +1426,10 @@ function classifyAction_(oldRows, queueRows, tx, qx, shareOverage) {
       reason: '原方案續約：Share Plan 超額單價依組內最高值統一，不視為換方案。'
     };
   }
-  const oldNormalized = oldRows.map(row => normalizedPlanSignature_(row, tx, signatureOptions));
-  const newNormalized = queueRows.map(r => normalizedPlanSignature_(r.values, qx, signatureOptions));
+  const oldNormalizationOptions = Object.assign({}, signatureOptions, { billingNormalizationSide:'original' });
+  const newNormalizationOptions = Object.assign({}, signatureOptions, { billingNormalizationSide:'renewal' });
+  const oldNormalized = oldRows.map(row => normalizedPlanSignature_(row, tx, oldNormalizationOptions));
+  const newNormalized = queueRows.map(r => normalizedPlanSignature_(r.values, qx, newNormalizationOptions));
   if (sameMultiset_(oldNormalized, newNormalized)) {
     return {
       action: 'Maintain',
@@ -559,7 +1440,7 @@ function classifyAction_(oldRows, queueRows, tx, qx, shareOverage) {
     };
   }
   if (isProratedOriginalRenewal_(oldRows, queueRows, tx, qx)) {
-    return { action: 'Maintain', planChange: false, reason: '原方案續約：原合約為短約，年費與組數符合 30 天制 prorate 換算；續約改為完整一年。' };
+    return { action: 'Maintain', planChange: false, reason: '原方案續約：原合約為短約，年費與組數符合實際日曆月份天數的 prorate 換算；續約改為完整一年。' };
   }
   const oldKeys = oldRows.map(row => productKey_(row, tx));
   const newKeys = queueRows.map(r => productKey_(r.values, qx));
@@ -571,7 +1452,9 @@ function classifyAction_(oldRows, queueRows, tx, qx, shareOverage) {
 
 function planSignature_(row, ix, options) {
   const ignoreShareOverage = shouldIgnoreShareOverage_(row, ix, options);
-  const labels = ['產品', '合約起始日', '合約結束日', '付款週期', '合約組數', '合約贈送組數', '合約價格', 'Share Plan ID', '超額計算方式', '超額每組單價'];
+  // Renewal dates naturally change every term.  They are checked against the
+  // evidence separately and are not part of the commercial-plan identity.
+  const labels = ['產品', '付款週期', '合約組數', '合約贈送組數', '合約價格', 'Share Plan ID', '超額計算方式', '超額每組單價'];
   return labels.map(h => {
     if (h === '超額每組單價' && ignoreShareOverage) return '';
     return auditText_(auditGet_(row, ix, h,
@@ -580,7 +1463,7 @@ function planSignature_(row, ix, options) {
   }).join('¦');
 }
 function normalizedPlanSignature_(row, ix, options) {
-  const labels = ['產品', '合約起始日', '合約結束日', '付款週期', '合約組數', '合約贈送組數', '合約價格', 'Share Plan ID', '超額計算方式', '超額每組單價'];
+  const labels = ['產品', '付款週期', '合約組數', '合約贈送組數', '合約價格', 'Share Plan ID', '超額計算方式', '超額每組單價'];
   return labels.map(h => normalizedPlanFieldValue_(row, ix, h, options)).join('¦');
 }
 function normalizedPlanFieldValue_(row, ix, label, options) {
@@ -591,7 +1474,13 @@ function normalizedPlanFieldValue_(row, ix, label, options) {
   const value = auditGet_(row, ix, label,
     label === '產品' || label.indexOf('合約') === 0 || label.indexOf('付款週期') === 0 || label.indexOf('超額') === 0
   );
-  if (label === '付款週期' && !isMainProduct_(product)) return '';
+  // Billing normalization is directional.  Only an original monthly add-on
+  // may be represented as annual at renewal; annual -> monthly remains a
+  // real payment-cycle change and must not be normalized away.
+  if (label === '付款週期' && !isMainProduct_(product)) {
+    if (options && options.billingNormalizationSide === 'original' && billingCycle === 'monthly') return 'annual';
+    return billingCycle;
+  }
   if (label === '超額每組單價' && shouldIgnoreShareOverage_(row, ix, options)) return '';
   // A blank RSV/RwG gift count and numeric zero both mean that no free groups
   // are included.  This equivalence is intentionally limited to the main
@@ -621,7 +1510,8 @@ function normalizedPlanFieldValue_(row, ix, label, options) {
   // product is annual (for example Deposit 1,500/month becomes 18,000/year).
   // Compare those two representations on the same annual basis so this
   // approved billing normalization is not mistaken for a plan change.
-  if (label === '合約價格' && !isMainProduct_(product) && billingCycle === 'monthly') {
+  if (label === '合約價格' && !isMainProduct_(product) && billingCycle === 'monthly' &&
+      options && options.billingNormalizationSide === 'original') {
     const monthly = Number(value);
     if (isFinite(monthly) && auditText_(value) !== '') return auditText_(monthly * 12);
   }
@@ -629,23 +1519,32 @@ function normalizedPlanFieldValue_(row, ix, label, options) {
   return auditText_(value);
 }
 function planDifferenceSummary_(oldRows, queueRows, tx, qx, options) {
-  const fields = ['合約起始日', '合約結束日', '付款週期', '合約組數', '合約贈送組數', '合約價格', 'Share Plan ID', '超額計算方式', '超額每組單價'];
+  const fields = ['付款週期', '合約組數', '合約贈送組數', '合約價格', 'Share Plan ID', '超額計算方式', '超額每組單價'];
   const oldByProduct = groupBy_(oldRows, row => auditText_(auditGet_(row, tx, '產品', true)));
   const newByProduct = groupBy_(queueRows.map(r => r.values), row => auditText_(auditGet_(row, qx, '產品', true)));
   const products = [...new Set(Object.keys(oldByProduct).concat(Object.keys(newByProduct)))].sort();
   const differences = [];
   products.forEach(product => {
     const oldGroup = (oldByProduct[product] || []).slice().sort((a, b) =>
-      normalizedPlanSignature_(a, tx, options).localeCompare(normalizedPlanSignature_(b, tx, options))
+      planSignature_(a, tx, options).localeCompare(planSignature_(b, tx, options))
     );
     const newGroup = (newByProduct[product] || []).slice().sort((a, b) =>
-      normalizedPlanSignature_(a, qx, options).localeCompare(normalizedPlanSignature_(b, qx, options))
+      planSignature_(a, qx, options).localeCompare(planSignature_(b, qx, options))
     );
     const paired = Math.min(oldGroup.length, newGroup.length);
     for (let i = 0; i < paired; i++) {
       fields.forEach(label => {
-        const oldNormalized = normalizedPlanFieldValue_(oldGroup[i], tx, label, options);
-        const newNormalized = normalizedPlanFieldValue_(newGroup[i], qx, label, options);
+        const oldPeriod = auditText_(auditGet_(oldGroup[i], tx, '付款週期', true)).toLowerCase();
+        const newPeriod = auditText_(auditGet_(newGroup[i], qx, '付款週期', true)).toLowerCase();
+        const normalizeMonthlyToAnnual = !isMainProduct_(product) && oldPeriod === 'monthly' && newPeriod === 'annual';
+        const oldOptions = normalizeMonthlyToAnnual
+          ? Object.assign({}, options || {}, { billingNormalizationSide:'original' })
+          : options;
+        const newOptions = normalizeMonthlyToAnnual
+          ? Object.assign({}, options || {}, { billingNormalizationSide:'renewal' })
+          : options;
+        const oldNormalized = normalizedPlanFieldValue_(oldGroup[i], tx, label, oldOptions);
+        const newNormalized = normalizedPlanFieldValue_(newGroup[i], qx, label, newOptions);
         if (oldNormalized === newNormalized) return;
         differences.push(
           product + (paired > 1 ? ' #' + (i + 1) : '') + ' ' + label + '：原始 TPR「' +
@@ -711,18 +1610,20 @@ function proratedValueMatches_(oldValue, annualValue, factor) {
   return Math.abs(oldNumber - Math.round(annualNumber / 12 * factor)) <= 0.000001;
 }
 function dateFromCell_(value) {
-  if (value instanceof Date && !isNaN(value.getTime())) return new Date(Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()));
-  const m = auditText_(value).match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  const dateText = dateOnlyText_(value);
+  const m = dateText.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   return m ? new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) : null;
 }
+function dateOnlyText_(value, timeZone) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, timeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  const match = auditText_(value).match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:\s+.*)?$/);
+  if (!match) return '';
+  return match[1] + '-' + ('0' + Number(match[2])).slice(-2) + '-' + ('0' + Number(match[3])).slice(-2);
+}
 function auditDateText_(value) {
-  // Sheet date cells are Date objects representing local midnight in the
-  // spreadsheet time zone.  Normalize their local Y/M/D through
-  // dateFromCell_ before formatting in UTC, otherwise Taiwan dates are
-  // displayed and compared as the previous day.
-  const date = dateFromCell_(value);
-  if (!date || isNaN(date.getTime())) return '';
-  return Utilities.formatDate(date, 'UTC', 'yyyy-MM-dd');
+  return dateOnlyText_(value);
 }
 function isFullYearTerm_(start, end) {
   const expectedEnd = new Date(Date.UTC(start.getUTCFullYear() + 1, start.getUTCMonth(), start.getUTCDate() - 1));
@@ -754,12 +1655,564 @@ function productKey_(row, ix) {
 function sameMultiset_(a, b) { return a.length === b.length && a.slice().sort().join('\n') === b.slice().sort().join('\n'); }
 function groupBy_(items, key) { return items.reduce((o, item) => { const k = key(item); (o[k] || (o[k] = [])).push(item); return o; }, {}); }
 
-function contractAudit_(review, planChange, billing, queueRows, qx, control, planDifference) {
+/**
+ * Contract product facts are provider-neutral JSON.  A review enters the new
+ * mode when either the review version or JSON cell has a value; once that
+ * happens, missing or invalid structured data must fail closed instead of
+ * falling back to a legacy Full Plan Match=TRUE checkbox.
+ */
+function structuredDocumentMatchAudit_(review, queueRows, qx) {
+  const parsed = parseStructuredContractData_(review);
+  if (parsed.result === 'NO_STRUCTURED_DATA') {
+    return {
+      result:'NO_STRUCTURED_DATA', hasInput:false,
+      reason:'Legacy review has no structured contract data.', detail:'Legacy Full Plan Match fallback applies.'
+    };
+  }
+  if (parsed.result !== 'OK') {
+    return { result:'NEEDS_REVIEW', hasInput:true, reason:parsed.reason, detail:parsed.reason };
+  }
+
+  const normalized = normalizeStructuredDocumentProducts_(parsed.data);
+  if (normalized.errors.length) {
+    const reason = 'Structured Contract Data 尚無法可靠比較：' + normalized.errors.join('；');
+    return {
+      result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason,
+      structuredData:parsed.data
+    };
+  }
+
+  const comparison = compareStructuredDocumentProducts_(normalized.lines, queueRows, qx);
+  return {
+    result:comparison.result,
+    hasInput:true,
+    reason:comparison.reason,
+    detail:comparison.detail,
+    structuredData:parsed.data
+  };
+}
+
+function parseStructuredContractData_(review) {
+  const reviewVersion = auditText_(review['Structured Review Version']);
+  const raw = review['Structured Contract Data'];
+  const rawText = typeof raw === 'string' ? raw.trim() : auditText_(raw);
+  if (!reviewVersion && !rawText) return { result:'NO_STRUCTURED_DATA' };
+  if (reviewVersion !== '1') {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Structured review mode 已啟用，但 Structured Review Version 必須為 1（目前為「' +
+        (reviewVersion || '空白') + '」）'
+    };
+  }
+  if (!rawText) {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Structured review mode 已啟用，但 Structured Contract Data 缺失；不得沿用 Full Plan Match'
+    };
+  }
+
+  let data;
+  try {
+    data = typeof raw === 'object' && raw !== null ? raw : JSON.parse(rawText);
+  } catch (error) {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data 不是有效 JSON：' + error.message };
+  }
+  if (!data || Array.isArray(data) || typeof data !== 'object') {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data 必須是 JSON object' };
+  }
+  if (String(data.schema_version || '') !== '1') {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Structured Contract Data schema_version 必須為 1（目前為「' +
+        auditText_(data.schema_version) + '」）'
+    };
+  }
+
+  const evidenceSet = data.evidence_set;
+  if (!evidenceSet || typeof evidenceSet !== 'object' || Array.isArray(evidenceSet)) {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data 缺少 evidence_set' };
+  }
+  const evidenceState = structuredState_(evidenceSet.state);
+  if (evidenceState === 'ambiguous' || evidenceState === 'unreadable') {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Branch relevant evidence set 為 ' + displayStructuredState_(evidenceSet.state) +
+        '，無法確認文件集合是否完整'
+    };
+  }
+  if (evidenceState !== 'confirmed' || evidenceSet.complete !== true) {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'document_set_complete 尚未確認：必須完成 Branch relevant evidence set 盤點，不是只讀取單一檔案'
+    };
+  }
+  if (!Array.isArray(evidenceSet.relevant_source_ids)) {
+    return { result:'NEEDS_REVIEW', reason:'evidence_set.relevant_source_ids 必須列出本 Branch 的 relevant files' };
+  }
+  const relevantSourceIds = [...new Set(evidenceSet.relevant_source_ids.map(auditText_).filter(Boolean))];
+  if (!relevantSourceIds.length) {
+    return { result:'NEEDS_REVIEW', reason:'evidence_set 沒有列出任何 relevant source，無法確認完整方案證據' };
+  }
+  if (!Array.isArray(data.products)) {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data products 必須是 array' };
+  }
+  data.evidence_set.relevant_source_ids = relevantSourceIds;
+  return { result:'OK', data };
+}
+
+function structuredState_(value) {
+  return auditText_(value).toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function displayStructuredState_(value) {
+  return auditText_(value) || '空白';
+}
+
+function normalizeStructuredDocumentProducts_(data) {
+  const relevantSourceIds = data.evidence_set.relevant_source_ids;
+  const errors = [];
+  const lines = [];
+  data.products.forEach((row, index) => {
+    const label = 'products[' + index + ']';
+    if (!row || Array.isArray(row) || typeof row !== 'object') {
+      errors.push(label + ' 必須是 object');
+      return;
+    }
+    const sourceId = auditText_(row.source_id);
+    if (!sourceId) errors.push(label + '.source_id 缺失');
+    else if (relevantSourceIds.indexOf(sourceId) < 0) {
+      errors.push(label + '.source_id「' + sourceId + '」不在 evidence_set.relevant_source_ids');
+    }
+
+    const productField = structuredField_(row, 'product', label, { confirmedRequired:true, type:'product' });
+    if (productField.error) {
+      errors.push(productField.error);
+      return;
+    }
+    const product = canonicalDocumentProduct_(productField.value);
+    if (!isSupportedDocumentProduct_(product)) {
+      errors.push(label + '.product「' + displayStructuredValue_(productField.value) + '」不是目前支援的 canonical Product');
+      return;
+    }
+
+    const values = {};
+    const common = [
+      ['billing_period', 'billing', 'billing'],
+      ['usage_sets', 'sets', 'sets'],
+      ['bonus_sets', 'bonus', 'number'],
+      ['price', 'price', 'number'],
+      ['share_plan_id', 'share', 'identifier']
+    ];
+    common.forEach(spec => {
+      const field = structuredField_(row, spec[0], label, {
+        type:spec[2], notMentionedAsZero:spec[0] === 'bonus_sets' && isMainProduct_(product)
+      });
+      if (field.error) errors.push(field.error);
+      else {
+        values[spec[1]] = field.value;
+        if (spec[0] === 'price') values.priceState = structuredState_(row.price.state);
+      }
+    });
+
+    if (product === 'Deposit' || product === 'Deposit-Commission') {
+      const depositType = structuredField_(row, 'deposit_type', label, { type:'text' });
+      if (depositType.error) errors.push(depositType.error);
+      else values.overageMethod = depositType.value;
+    } else {
+      const overageMethod = structuredField_(row, 'overage_method', label, { type:'text' });
+      if (overageMethod.error) errors.push(overageMethod.error);
+      else values.overageMethod = overageMethod.value;
+    }
+
+    if (product === 'Deposit') {
+      const setupFee = structuredField_(row, 'setup_fee', label, { type:'number' });
+      if (setupFee.error) errors.push(setupFee.error);
+      else values.overagePrice = setupFee.value;
+      const commission = structuredCommissionValue_(row, label, false);
+      if (commission.error) errors.push(commission.error);
+      else if (commission.present) values.bonus = commission.value;
+    } else if (product === 'Deposit-Commission') {
+      const commission = structuredCommissionValue_(row, label, true);
+      if (commission.error) errors.push(commission.error);
+      else values.bonus = commission.value;
+      values.overagePrice = '';
+    } else {
+      const overagePrice = structuredField_(row, 'overage_unit_price', label, { type:'number' });
+      if (overagePrice.error) errors.push(overagePrice.error);
+      else values.overagePrice = overagePrice.value;
+    }
+
+    if (isMainProduct_(product) && (values.bonus === '' || values.bonus === '0')) values.bonus = '0';
+    if (product === 'Deposit' && values.overageMethod === 'b2b' && (values.bonus === '' || values.bonus === '0')) {
+      values.bonus = '0';
+    }
+    if (product === 'Deposit' && (values.overagePrice === '' || values.overagePrice === '0')) {
+      values.overagePrice = '0';
+    }
+    if (isMainProduct_(product) && values.sets === 'unlimited' &&
+        (values.overagePrice === '' || values.overagePrice === '0')) {
+      values.overagePrice = '0';
+    }
+    lines.push(Object.assign({ product, sourceId, index }, values));
+  });
+  return { lines, errors:[...new Set(errors)] };
+}
+
+function structuredField_(row, fieldName, rowLabel, options) {
+  const field = row[fieldName];
+  const label = rowLabel + '.' + fieldName;
+  if (!field || Array.isArray(field) || typeof field !== 'object') {
+    return { error:label + ' 必須包含 state 與 value' };
+  }
+  const state = structuredState_(field.state);
+  if (state === 'unreadable' || state === 'ambiguous') {
+    return { error:label + ' 為 ' + displayStructuredState_(field.state) + '，需人工確認文件' };
+  }
+  if (options && options.confirmedRequired && state !== 'confirmed') {
+    return { error:label + ' 必須為 Confirmed' };
+  }
+  if (state === 'notmentioned') {
+    return { value:options && options.notMentionedAsZero ? '0' : '', state };
+  }
+  if (state === 'notapplicable') return { value:'', state };
+  if (state !== 'confirmed') {
+    return { error:label + ' state 必須為 Confirmed、NotMentioned、Unreadable、Ambiguous 或 NotApplicable' };
+  }
+  return normalizeStructuredValue_(field.value, options && options.type, label);
+}
+
+function normalizeStructuredValue_(value, type, label) {
+  if (type === 'product') return { value:auditText_(value) };
+  if (type === 'identifier') return { value:auditText_(value) };
+  if (type === 'text') return { value:auditText_(value).toLowerCase() };
+  if (type === 'billing') {
+    const text = auditText_(value).toLowerCase();
+    const aliases = { '年繳':'annual', '月繳':'monthly' };
+    return { value:aliases[text] || text };
+  }
+  if (type === 'sets' && auditText_(value).toLowerCase() === 'unlimited') return { value:'unlimited' };
+  if (type === 'number' || type === 'sets') {
+    const number = auditNumber_(value);
+    if (number === null) return { error:label + ' state=Confirmed 但 value 不是有效數字' };
+    return { value:String(number) };
+  }
+  return { value:auditText_(value) };
+}
+
+function structuredCommissionValue_(row, rowLabel, required) {
+  const commission = structuredOptionalNumberField_(row, 'commission_rate', rowLabel);
+  const buyIn = structuredOptionalNumberField_(row, 'buy_in_price', rowLabel);
+  if (commission.error) return commission;
+  if (buyIn.error) return buyIn;
+  if (!commission.present && !buyIn.present) {
+    return required
+      ? { error:rowLabel + ' 必須以 commission_rate 或 buy_in_price 明確記錄 Deposit-Commission 費率' }
+      : { present:false };
+  }
+  const commissionNumber = commission.present ? Number(commission.value) : 100 - Number(buyIn.value);
+  if (commission.present && buyIn.present && Math.abs(commissionNumber - (100 - Number(buyIn.value))) > 0.000001) {
+    return { error:rowLabel + ' 的 commission_rate 與 buy_in_price 互相矛盾' };
+  }
+  return { present:true, value:String(commissionNumber) };
+}
+
+function structuredOptionalNumberField_(row, fieldName, rowLabel) {
+  if (row[fieldName] === undefined) return { present:false };
+  const field = structuredField_(row, fieldName, rowLabel, { type:'number' });
+  if (field.error) return field;
+  return field.value === '' ? { present:false } : { present:true, value:field.value };
+}
+
+function canonicalDocumentProduct_(value) {
+  const text = auditText_(value);
+  const known = {
+    'rsv':'RSV', 'rwg':'RwG', 'deposit':'Deposit', 'deposit-commission':'Deposit-Commission',
+    'voice':'Voice', 'survey':'Survey', 'ecoupon':'eCoupon'
+  };
+  return known[text.toLowerCase()] || text;
+}
+
+function isSupportedDocumentProduct_(product) {
+  return ['RSV', 'RwG', 'Deposit', 'Deposit-Commission', 'Voice', 'Survey', 'eCoupon'].indexOf(product) >= 0;
+}
+
+function normalizeQueueDocumentProduct_(row, qx) {
+  const product = canonicalDocumentProduct_(auditGet_(row, qx, '產品', true));
+  const overageMethod = auditText_(auditGet_(row, qx, '超額計算方式', true)).toLowerCase();
+  const setsRaw = auditGet_(row, qx, '合約組數', true);
+  let bonus = normalizeQueueComparableScalar_(auditGet_(row, qx, '合約贈送組數', true), false);
+  let overagePrice = normalizeQueueComparableScalar_(auditGet_(row, qx, '超額每組單價', true), false);
+  if (isMainProduct_(product) && (bonus === '' || bonus === '0')) bonus = '0';
+  if (product === 'Deposit' && overageMethod === 'b2b' && (bonus === '' || bonus === '0')) bonus = '0';
+  if (product === 'Deposit' && (overagePrice === '' || overagePrice === '0')) overagePrice = '0';
+  if (isMainProduct_(product) && auditText_(setsRaw).toLowerCase() === 'unlimited' &&
+      (overagePrice === '' || overagePrice === '0')) overagePrice = '0';
+  return {
+    product,
+    billing:auditText_(auditGet_(row, qx, '付款週期', true)).toLowerCase(),
+    sets:normalizeQueueComparableScalar_(setsRaw, true),
+    bonus,
+    price:normalizeQueueComparableScalar_(auditGet_(row, qx, '合約價格', true), false),
+    share:auditText_(auditGet_(row, qx, 'Share Plan ID')),
+    overageMethod,
+    overagePrice
+  };
+}
+
+function normalizeQueueComparableScalar_(value, allowUnlimited) {
+  const text = auditText_(value);
+  if (!text) return '';
+  if (allowUnlimited && text.toLowerCase() === 'unlimited') return 'unlimited';
+  const number = auditNumber_(value);
+  return number === null ? text.toLowerCase() : String(number);
+}
+
+function compareStructuredDocumentProducts_(documentLines, queueRows, qx) {
+  const queueLines = queueRows.map(r => normalizeQueueDocumentProduct_(r.values, qx));
+  const allowMonthlyAddOnAnnualization = queueLines.some(line =>
+    isMainProduct_(line.product) && line.billing === 'annual'
+  );
+  const documentByProduct = groupBy_(documentLines, line => line.product.toLowerCase());
+  const queueByProduct = groupBy_(queueLines, line => line.product.toLowerCase());
+  const productKeys = [...new Set(Object.keys(documentByProduct).concat(Object.keys(queueByProduct)))].sort();
+  const differences = [];
+
+  productKeys.forEach(key => {
+    const documents = (documentByProduct[key] || []).slice();
+    const queues = (queueByProduct[key] || []).slice();
+    const product = documents[0] && documents[0].product || queues[0] && queues[0].product || key;
+    const matching = maximumStructuredLineMatching_(documents, queues, allowMonthlyAddOnAnnualization);
+    const unmatchedDocuments = documents.filter((line, index) => matching.documentMatches[index] < 0)
+      .sort((a, b) => structuredLineSignature_(a).localeCompare(structuredLineSignature_(b)));
+    const unmatchedQueues = queues.filter((line, index) => matching.queueMatches[index] < 0)
+      .sort((a, b) => structuredLineSignature_(a).localeCompare(structuredLineSignature_(b)));
+    const pairCount = Math.min(unmatchedDocuments.length, unmatchedQueues.length);
+    for (let i = 0; i < pairCount; i++) {
+      differences.push.apply(differences, structuredDocumentLineDifferences_(
+        unmatchedDocuments[i], unmatchedQueues[i], allowMonthlyAddOnAnnualization
+      ));
+    }
+    unmatchedDocuments.slice(pairCount).forEach(line => {
+      differences.push('文件多出 ' + product + ' 產品列（source ' + line.sourceId + '）');
+    });
+    unmatchedQueues.slice(pairCount).forEach(() => {
+      differences.push('Queue 有 ' + product + ' 產品列，但完整文件集合未列出對應產品');
+    });
+  });
+
+  if (differences.length) {
+    const detail = '文件方案與 Queue 不一致：' + differences.join('；');
+    return { result:'MISMATCH', reason:detail, detail };
+  }
+  const detail = 'Structured Contract Data 與 Queue 的 ' + queueLines.length + ' 個產品列逐項一致。';
+  return { result:'MATCH', reason:'', detail };
+}
+
+function maximumStructuredLineMatching_(documents, queues, allowAnnualization) {
+  const queueMatches = queues.map(() => -1);
+  function assign(documentIndex, seenQueues) {
+    for (let queueIndex = 0; queueIndex < queues.length; queueIndex++) {
+      if (seenQueues[queueIndex] || !structuredDocumentLineEqual_(
+        documents[documentIndex], queues[queueIndex], allowAnnualization
+      )) continue;
+      seenQueues[queueIndex] = true;
+      if (queueMatches[queueIndex] < 0 || assign(queueMatches[queueIndex], seenQueues)) {
+        queueMatches[queueIndex] = documentIndex;
+        return true;
+      }
+    }
+    return false;
+  }
+  documents.forEach((line, index) => assign(index, queues.map(() => false)));
+  const documentMatches = documents.map(() => -1);
+  queueMatches.forEach((documentIndex, queueIndex) => {
+    if (documentIndex >= 0) documentMatches[documentIndex] = queueIndex;
+  });
+  return { documentMatches, queueMatches };
+}
+
+function structuredDocumentLineEqual_(documentLine, queueLine, allowAnnualization) {
+  return structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnualization).length === 0;
+}
+
+function structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnualization) {
+  const adjusted = Object.assign({}, documentLine);
+  const monthlyPrice = Number(documentLine.price);
+  const product = queueLine.product || documentLine.product;
+  const positiveAddOnPrice = monthlyPrice > 0;
+  const confirmedZeroDepositPrice = product === 'Deposit' && monthlyPrice === 0 &&
+    documentLine.priceState === 'confirmed';
+  if (allowAnnualization && !isMainProduct_(queueLine.product) &&
+      documentLine.billing === 'monthly' && queueLine.billing === 'annual' &&
+      documentLine.price !== '' && isFinite(monthlyPrice) &&
+      (positiveAddOnPrice || confirmedZeroDepositPrice)) {
+    adjusted.billing = 'annual';
+    adjusted.price = String(monthlyPrice * 12);
+  }
+  // Deposit-Commission is a per-transaction rate, not a recurring charge.
+  // Its document billing_period is therefore NotApplicable and must not be
+  // inferred from the main product or compared with Queue's inherited period.
+  const fields = [
+    ['billing', '付款週期'], ['sets', '使用組數'], ['bonus', '贈送組數'], ['price', '價格'],
+    ['share', 'Share Plan ID'], ['overageMethod', '超額計算方式'], ['overagePrice', '超額單價']
+  ].filter(pair => product !== 'Deposit-Commission' || pair[0] !== 'billing');
+  return fields.filter(pair => adjusted[pair[0]] !== queueLine[pair[0]]).map(pair =>
+    product + ' ' + pair[1] + '：文件 ' + displayStructuredValue_(documentLine[pair[0]]) +
+      '、Queue ' + displayStructuredValue_(queueLine[pair[0]])
+  );
+}
+
+function structuredLineSignature_(line) {
+  return [line.product, line.billing, line.sets, line.bonus, line.price, line.share,
+    line.overageMethod, line.overagePrice].map(value => String(value === undefined ? '' : value)).join('¦');
+}
+
+function displayStructuredValue_(value) {
+  return value === '' || value === null || value === undefined ? '空白／不適用' : String(value);
+}
+
+/**
+ * Preserve the existing Deposit-Commission gate by projecting structured
+ * facts into its current review-field interface.  Its comparison policy and
+ * tolerance remain untouched.
+ */
+function structuredReviewForProtectedGates_(review, documentMatch) {
+  const out = Object.assign({}, review);
+  if (!documentMatch || !documentMatch.structuredData) return out;
+  const products = documentMatch.structuredData.products.filter(row => {
+    if (!row || typeof row !== 'object') return false;
+    const field = row.product;
+    return field && structuredState_(field.state) === 'confirmed' &&
+      canonicalDocumentProduct_(field.value) === 'Deposit-Commission';
+  });
+  const commissions = uniqueConfirmedStructuredNumbers_(products, 'commission_rate');
+  const buyIns = uniqueConfirmedStructuredNumbers_(products, 'buy_in_price');
+  if (commissions.length === 1) out['Deposit Commission Rate (%)'] = commissions[0];
+  if (buyIns.length === 1) out['Deposit Buy-in Price (%)'] = buyIns[0];
+  return out;
+}
+
+function uniqueConfirmedStructuredNumbers_(rows, fieldName) {
+  const values = rows.map(row => row[fieldName]).filter(field =>
+    field && structuredState_(field.state) === 'confirmed'
+  ).map(field => auditNumber_(field.value)).filter(value => value !== null);
+  return [...new Set(values)];
+}
+
+function writeDocumentMatchTraces_(sheet, traces, activeBatchId) {
+  if (!sheet || !traces || !traces.length) return;
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return;
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [
+    'Branch ID', 'Structured Review Version', 'Structured Contract Data',
+    'Document Match Result', 'Document Match Detail'
+  ];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(values[0].map(String), requiredHeaders, sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' cannot write Document Match trace; missing headers: ' + plan.missing.join(', '));
+  }
+  const branchColumn = plan.positions['Branch ID'];
+  const versionColumn = plan.positions['Structured Review Version'];
+  const dataColumn = plan.positions['Structured Contract Data'];
+  const resultColumn = plan.positions['Document Match Result'];
+  const detailColumn = plan.positions['Document Match Detail'];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
+  const preflightErrors = [];
+  const targetRows = {};
+  const targetBranches = {};
+  const updates = traces.map((trace, index) => {
+    const label = 'trace ' + (index + 1);
+    const branchId = auditText_(trace && trace.branchId);
+    const rowNumber = Number(trace && trace.targetRowNumber);
+    const traceBatchId = auditText_(trace && trace.reviewBatchId);
+    const expectedVersion = auditText_(trace && trace.expectedStructuredReviewVersion);
+    const expectedData = auditText_(trace && trace.expectedStructuredContractData);
+    if (!branchId) preflightErrors.push(label + ' 缺少 Branch ID');
+    if (currentBatchId && traceBatchId !== currentBatchId) {
+      preflightErrors.push(label + ' Review Batch ID 不一致：預期 ' + currentBatchId +
+        '，trace 為 ' + (traceBatchId || '空白'));
+    }
+    if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > values.length) {
+      preflightErrors.push(label + ' targetRowNumber 無效：' + auditText_(trace && trace.targetRowNumber));
+      return null;
+    }
+    if (targetRows[rowNumber]) {
+      preflightErrors.push('target row ' + rowNumber + ' 同時被 ' + targetRows[rowNumber] + ' 與 ' + branchId + ' 指定');
+    } else {
+      targetRows[rowNumber] = branchId;
+    }
+    if (targetBranches[branchId]) {
+      preflightErrors.push('Branch ' + branchId + ' 有多個 writer targets：' +
+        targetBranches[branchId] + ', ' + rowNumber);
+    } else if (branchId) {
+      targetBranches[branchId] = rowNumber;
+    }
+    const row = values[rowNumber - 1];
+    const actualBranchId = auditText_(row[branchColumn]);
+    if (actualBranchId !== branchId) {
+      preflightErrors.push('row ' + rowNumber + ' Branch ID 已變更：預期 ' + branchId + '，目前 ' + actualBranchId);
+    }
+    const actualVersion = auditText_(row[versionColumn]);
+    const actualData = auditText_(row[dataColumn]);
+    if (currentBatchId && auditText_(row[batchColumn]) !== currentBatchId) {
+      preflightErrors.push('row ' + rowNumber + ' Review Batch ID 已變更：預期 ' + currentBatchId +
+        '，目前 ' + (auditText_(row[batchColumn]) || '空白'));
+    }
+    if (actualVersion !== '1') {
+      preflightErrors.push('row ' + rowNumber + ' Structured Review Version 不是 1');
+    }
+    if (actualData === '') {
+      preflightErrors.push('row ' + rowNumber + ' Structured Contract Data 已清空');
+    }
+    if (actualVersion !== expectedVersion) {
+      preflightErrors.push('row ' + rowNumber + ' Structured Review Version 與 indexing snapshot 不一致');
+    }
+    if (actualData !== expectedData) {
+      preflightErrors.push('row ' + rowNumber + ' Structured Contract Data 與 indexing snapshot 不一致');
+    }
+    return {
+      rowNumber,
+      result:trace.result,
+      detail:trace.detail || trace.reason || ''
+    };
+  });
+  Object.keys(targetBranches).forEach(branchId => {
+    const activeRows = [];
+    values.slice(1).forEach((row, index) => {
+      if (auditText_(row[branchColumn]) !== branchId) return;
+      if (currentBatchId) {
+        if (auditText_(row[batchColumn]) === currentBatchId) activeRows.push(index + 2);
+      } else if (auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== '') {
+        activeRows.push(index + 2);
+      }
+    });
+    const expectedRow = targetBranches[branchId];
+    if (activeRows.length !== 1 || activeRows[0] !== expectedRow) {
+      preflightErrors.push('Branch ' + branchId + ' 的最新 Sheet snapshot 必須只有 target row ' +
+        expectedRow + (currentBatchId ? ' 屬於 Active Contract Review Batch「' + currentBatchId + '」' :
+          ' 是完整 active structured row') + '；目前 rows：' +
+        (activeRows.length ? activeRows.join(', ') : '無'));
+    }
+  });
+  if (preflightErrors.length) {
+    throw new Error(sheet.getName() + ' Document Match writer preflight failed: ' +
+      preflightErrors.join('；'));
+  }
+  updates.forEach(update => {
+    sheet.getRange(update.rowNumber, resultColumn + 1, 1, 1).setValues([[update.result]]);
+    sheet.getRange(update.rowNumber, detailColumn + 1, 1, 1).setValues([[update.detail]]);
+  });
+}
+
+function contractAudit_(review, documentMatch, planChange, billing, queueRows, qx, control, planDifference) {
   const evidenceType = auditText_(review['Evidence Type']).toLowerCase();
-  const name = isPass_(review['Restaurant Name Match']);
+  const name = restaurantNameAudit_(review, queueRows, qx, control);
   const period = contractPeriodAudit_(review, queueRows, qx, control);
   const dates = period.result === 'Pass';
-  const plan = isPass_(review['Full Plan Match']);
+  const structuredMode = documentMatch && documentMatch.result !== 'NO_STRUCTURED_DATA';
+  const plan = structuredMode ? documentMatch.result === 'MATCH' : isPass_(review['Full Plan Match']);
   const depositCommission = depositCommissionAudit_(review, queueRows, qx, control);
   const seals = isPass_(review['Inline Seal']) && isPass_(review['Customer Seal']);
   const directConsent = isPass_(review['Customer Explicit Consent']);
@@ -768,20 +2221,42 @@ function contractAudit_(review, planChange, billing, queueRows, qx, control, pla
   // Evidence URL is prefilled from Queue when the review row is created.  It
   // is not, by itself, a completed document review: otherwise a fresh queue
   // would incorrectly be reported as a contract mismatch instead of pending.
-  const evidenceExists = !!evidenceType || name || period.hasInput || plan || seals || directConsent || agreementEmail ||
+  const evidenceExists = !!evidenceType || name.hasInput || period.hasInput || plan ||
+    (documentMatch && documentMatch.hasInput) || seals || directConsent || agreementEmail ||
     auditText_(review['Deposit Commission Rate (%)']) !== '' ||
-    auditText_(review['Deposit Buy-in Price (%)']) !== '';
-  const required = planChange
+    auditText_(review['Deposit Buy-in Price (%)']) !== '' ||
+    auditText_(review['Annual Payment Amount (NTD)']) !== '' ||
+    auditText_(review['Annual Payment Evidence Quote']) !== '' ||
+    auditText_(review['Annual Payment Evidence Location']) !== '';
+  const splitBilling = !!(billing && billing.requiresDualSeal);
+  const required = planChange || splitBilling
     ? '雙方用印正式合約／增補協議；餐廳名稱、合約期間與完整方案均須一致'
     : '完整信件中客戶明確同意，或雙方用印文件；餐廳名稱、合約期間與完整方案均須一致';
   if (!evidenceExists) return { result: 'Need Review', required, reason: '尚未填寫可讀取的合約／信件覆核結果' };
+  if (name.result !== 'Pass') return { result: name.result, required, reason: name.reason };
   if (period.result === 'Need Review') return { result: 'Need Review', required, reason: period.reason };
   if (period.result === 'Fail') return { result: 'Fail', required, reason: period.reason };
   if (depositCommission.result !== 'Pass') {
     return { result: depositCommission.result, required, reason: depositCommission.reason };
   }
-  if (!name || !plan) return { result: 'Fail', required, reason: '合約／信件未確認餐廳名稱與完整方案皆一致' };
+  if (structuredMode && documentMatch.result === 'NEEDS_REVIEW') {
+    return { result:'Need Review', required, reason:documentMatch.reason };
+  }
+  if (structuredMode && documentMatch.result === 'MISMATCH') {
+    return { result:'Fail', required, reason:documentMatch.reason };
+  }
+  if (structuredMode && isExplicitStructuredPlanVeto_(review['Manual Plan Veto'])) {
+    return { result:'Fail', required, reason:'Contract Evidence Review 已明確標記 Manual Plan Veto 不通過' };
+  }
+  if (!plan) return { result: 'Fail', required, reason: '合約／信件未確認完整方案一致' };
   if (billing.result !== 'Pass') return { result: billing.result, required, reason: billing.reason };
+  if (splitBilling && !seals) {
+    return {
+      result: 'Need Dual Seal',
+      required,
+      reason: billing.reason + '；RSV 年繳但正費用 add-on 維持月繳屬 split-billing 例外，需人工目視確認 inline 與客戶雙方用印'
+    };
+  }
   if (planChange && !seals) {
     return {
       result: 'Need Dual Seal',
@@ -791,6 +2266,101 @@ function contractAudit_(review, planChange, billing, queueRows, qx, control, pla
   }
   if (!planChange && !(seals || directConsent || agreementEmail)) return { result: 'Need Review', required, reason: '原方案續約尚未確認客戶明確同意、指定達成合意信件或雙方用印' };
   return { result: 'Pass', required, reason: '' };
+}
+
+/**
+ * Restaurant-name evidence is intentionally human-reviewed.  The program
+ * does not fuzzy-match brands or maintain an alias table; it records the
+ * exact document name and fails closed when the reviewer marks a mismatch.
+ * The reviewed Drive file ID is bound to the current Queue link so a replaced
+ * document cannot silently inherit an older approval.
+ */
+function restaurantNameAudit_(review, queueRows, qx, control) {
+  const legacyMatch = isPass_(review['Restaurant Name Match']);
+  const documentName = auditText_(review['Document Restaurant Name']);
+  const legalName = auditText_(review['Document Legal Entity Name']);
+  const matchText = auditText_(review['Restaurant Name Match Result']);
+  const reviewedFileId = auditText_(review['Reviewed Evidence File ID']);
+  const reviewedModifiedAt = auditText_(review['Reviewed Evidence Modified At']);
+  const hasInput = legacyMatch || !!documentName || !!legalName || !!matchText || !!reviewedFileId || !!reviewedModifiedAt;
+  const reviewedAt = dateFromCell_(review['Reviewed At']);
+  const requiredFrom = dateFromCell_(control['Restaurant Name Detail Required From']);
+  const explicitRequired = !!requiredFrom && (!reviewedAt || reviewedAt.getTime() >= requiredFrom.getTime());
+  const expectedNames = [...new Set(queueRows.map(r =>
+    auditText_(auditGet_(r.values, qx, '餐廳名稱', true))
+  ).filter(Boolean))];
+
+  if (!documentName && !matchText && !reviewedFileId) {
+    if (!explicitRequired) {
+      return legacyMatch
+        ? { result: 'Pass', reason: '', hasInput }
+        : { result: 'Fail', reason: '合約／信件未確認餐廳名稱一致', hasInput };
+    }
+    return {
+      result: 'Need Review',
+      reason: '尚未記錄文件實際店名、人工名稱比對結果與所覆核的 Drive 檔案 ID',
+      hasInput
+    };
+  }
+
+  if (!documentName || !matchText || !reviewedFileId || !reviewedModifiedAt) {
+    return {
+      result: 'Need Review',
+      reason: '餐廳名稱覆核追溯資料不完整：需填文件實際店名、人工比對結果、Drive 檔案 ID 與檔案更新時間',
+      hasInput: true
+    };
+  }
+
+  const queueFileIds = [...new Set(queueRows.map(r =>
+    driveFileId_(auditText_(auditGet_(r.values, qx, '合約')))
+  ).filter(Boolean))];
+  if (queueFileIds.length !== 1 || queueFileIds[0] !== reviewedFileId) {
+    return {
+      result: 'Need Review',
+      reason: '覆核文件版本與 Queue 合約連結不一致，需重新閱讀 Queue 目前連結的文件',
+      hasInput: true
+    };
+  }
+
+  if (isRestaurantNameReviewPending_(matchText)) {
+    const expected = expectedNames.length ? expectedNames.join('／') : '未填寫';
+    const legal = legalName ? '、簽約實體「' + legalName + '」' : '';
+    return {
+      result: 'Need Review',
+      reason: '餐廳名稱未能確認一致：Queue「' + expected + '」，文件使用店家「' + documentName + '」' + legal + '；文件未提供兩個店名為同一店的證據，需人工確認',
+      hasInput: true
+    };
+  }
+  if (!legacyMatch || !isRestaurantNameMatchResult_(matchText)) {
+    const expected = expectedNames.length ? expectedNames.join('／') : '未填寫';
+    const legal = legalName ? '、簽約實體「' + legalName + '」' : '';
+    return {
+      result: 'Fail',
+      reason: '餐廳名稱未能確認一致：Queue「' + expected + '」，文件使用店家「' + documentName + '」' + legal,
+      hasInput: true
+    };
+  }
+  return { result: 'Pass', reason: '', hasInput: true };
+}
+
+function isRestaurantNameReviewPending_(value) {
+  return ['need review', 'need manual confirmation', 'manual review', '人工確認', '待人工確認']
+    .includes(auditText_(value).toLowerCase());
+}
+
+function isRestaurantNameMatchResult_(value) {
+  return value === true || [
+    'true', 'pass', 'passed', 'yes', 'approved', 'match', 'matched',
+    'confirmed', 'human confirmed', '人工確認一致', '一致'
+  ].includes(auditText_(value).toLowerCase());
+}
+
+function driveFileId_(url) {
+  const value = auditText_(url);
+  const match = value.match(/\/d\/([A-Za-z0-9_-]+)/) ||
+    value.match(/\/folders\/([A-Za-z0-9_-]+)/) ||
+    value.match(/[?&]id=([A-Za-z0-9_-]+)/);
+  return match ? match[1] : '';
 }
 
 /**
@@ -953,41 +2523,89 @@ function longTermContractAudit_(queueRows, qx, review) {
 }
 
 function loadRsvBonusReference_(sheet) {
-  if (!sheet || sheet.getLastRow() < 2) return [];
-  const rows = readTable_(sheet).filter(r => ['RSV Public', 'RSV BD New'].includes(auditText_(r['Plan Family'])));
-  const families = groupBy_(rows, r => auditText_(r['Plan Family']));
-  const out = [];
-  Object.keys(families).forEach(family => {
-    const decoded = families[family].map(r => ({
-      sourceRow: Number(r['Source Row']),
-      values: rawPlanValues_(r['Raw Values JSON'])
-    })).filter(r => r.values.length);
-    const annualMarker = decoded.find(r => auditText_(r.values[0]) === '年繳方案');
-    if (!annualMarker) return;
-    const annualRows = decoded.filter(r => r.sourceRow >= annualMarker.sourceRow);
-    const usage = annualRows.find(r => auditText_(r.values[0]) === '使用組數');
-    const bonus = annualRows.find(r => auditText_(r.values[0]) === '贈送組數');
-    if (!usage || !bonus) return;
-    const width = Math.max(usage.values.length, bonus.values.length);
-    for (let col = 1; col < width; col++) {
-      const paid = auditNumber_(usage.values[col]);
-      const free = auditNumber_(bonus.values[col]);
-      if (paid === null || paid <= 0 || free === null || free < 0) continue;
-      out.push({ family, paid, bonus: free });
-    }
-  });
-  return out;
+  return loadRsvPlanReference_(sheet)
+    .filter(r => r.period === 'annual' && typeof r.sets === 'number' && r.sets > 0 && r.bonus >= 0)
+    .map(r => ({ family: r.family, paid: r.sets, bonus: r.bonus }));
 }
 
 function loadRsvFamilyReference_(sheet) {
+  return loadRsvPlanReference_(sheet);
+}
+
+/**
+ * Reads the current normalized TMS plan catalog.  Each Snapshot row is one
+ * inseparable plan combination with the source values in this order:
+ * Source Tab, billing period, product, paid sets, free sets, price, overage.
+ *
+ * Lite and Email Only are catalog tiers inside the Public compliance family.
+ * The legacy matrix parser is retained only so an older Snapshot fails over
+ * safely while the workbook is being migrated.
+ */
+function loadRsvPlanReference_(sheet) {
   if (!sheet || sheet.getLastRow() < 2) return [];
-  const rows = readTable_(sheet).filter(r =>
-    ['RSV Public', 'RSV BD New'].includes(auditText_(r['Plan Family']))
-  );
+  const rows = readTable_(sheet).filter(r => referencePlanFamily_(r['Plan Family'], rawPlanValues_(r['Raw Values JSON'])[0]));
+  const normalized = rows.map(normalizedRsvReferenceRow_).filter(Boolean);
+  if (normalized.length) return uniqueRsvReferences_(normalized);
+  return legacyRsvPlanReference_(rows);
+}
+
+function normalizedRsvReferenceRow_(row) {
+  const values = rawPlanValues_(row['Raw Values JSON']);
+  if (values.length < 7) return null;
+  const family = referencePlanFamily_(row['Plan Family'], values[0]);
+  const period = referenceBillingPeriod_(values[1]);
+  const productText = auditText_(values[2]).toLowerCase();
+  const product = productText === 'rwg' ? 'RwG' : productText === 'rsv' ? 'RSV' : '';
+  const sets = referenceReservationSets_(values[3]);
+  const free = auditNumber_(values[4]);
+  const price = auditNumber_(values[5]);
+  if (!family || !period || !product || sets === null || price === null) return null;
+  return {
+    planCode: auditText_(row['Normalized Combination ID']) || auditText_(row['Snapshot ID']),
+    family,
+    catalog: auditText_(values[0]),
+    product,
+    period,
+    sets,
+    bonus: free === null ? 0 : free,
+    price,
+    overage: auditNumber_(values[6])
+  };
+}
+
+function referencePlanFamily_(planFamily, sourceLabel) {
+  const family = auditText_(planFamily).toLowerCase();
+  const source = auditText_(sourceLabel).toLowerCase();
+  if (family === 'rsv bd new' || source === 'bd 新方案' || source === 'bd新方案') return 'BD New';
+  if (family === 'rsv public' || family === 'rsv public lite' || family === 'rsv public email only' ||
+      source === '公版方案' || source === 'lite 方案' || source === 'lite方案' ||
+      source === 'email only 方案' || source === 'email only方案') return 'Public';
+  return '';
+}
+
+function referenceBillingPeriod_(value) {
+  const period = auditText_(value).toLowerCase();
+  if (period === 'monthly' || period === '月繳') return 'monthly';
+  if (period === 'annual' || period === '年繳') return 'annual';
+  return '';
+}
+
+function uniqueRsvReferences_(rows) {
+  const seen = {};
+  return rows.filter(r => {
+    const key = [r.planCode, r.family, r.catalog, r.product, r.period, r.sets, r.bonus, r.price, r.overage].join('|');
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
+}
+
+function legacyRsvPlanReference_(rows) {
   const families = groupBy_(rows, r => auditText_(r['Plan Family']));
   const out = [];
   Object.keys(families).forEach(sourceFamily => {
-    const family = sourceFamily === 'RSV Public' ? 'Public' : 'BD New';
+    const family = referencePlanFamily_(sourceFamily, '');
+    if (!family) return;
     const decoded = families[sourceFamily].map(r => ({
       sourceRow: Number(r['Source Row']),
       values: rawPlanValues_(r['Raw Values JSON'])
@@ -1020,7 +2638,10 @@ function loadRsvFamilyReference_(sheet) {
         if (sets === null || amount === null) continue;
         const free = bonus ? auditNumber_(bonus.values[col]) : null;
         out.push({
+          planCode: '',
           family,
+          catalog: sourceFamily,
+          product: '',
           period: section.period,
           sets,
           bonus: free === null ? 0 : free,
@@ -1030,7 +2651,7 @@ function loadRsvFamilyReference_(sheet) {
       }
     });
   });
-  return out;
+  return uniqueRsvReferences_(out);
 }
 
 function referenceReservationSets_(value) {
@@ -1039,9 +2660,11 @@ function referenceReservationSets_(value) {
   return auditNumber_(value);
 }
 
-function inferRsvPlanFamily_(rows, ix, reference, shareOverage) {
+function inferRsvPlan_(rows, ix, reference, shareOverage, origin, options) {
+  options = options || {};
   const main = rows.find(r => isMainProduct_(auditText_(auditGet_(r, ix, '產品', true))));
-  if (!main || !reference.length) return '';
+  if (!main || !reference.length) return { family:'', planCode:'', resolved:false, conflict:'缺少主產品或方案參照資料', rule:'Unable to match' };
+  const product = auditText_(auditGet_(main, ix, '產品', true));
   const period = auditText_(auditGet_(main, ix, '付款週期', true)).toLowerCase();
   const sets = referenceReservationSets_(auditGet_(main, ix, '合約組數', true));
   const rawBonus = auditNumber_(auditGet_(main, ix, '合約贈送組數', true));
@@ -1050,8 +2673,9 @@ function inferRsvPlanFamily_(rows, ix, reference, shareOverage) {
   const overage = auditNumber_(auditGet_(main, ix, '超額每組單價', true));
   const shareId = auditText_(auditGet_(main, ix, 'Share Plan ID'));
   const ignoreOverage = !!shareId && shareOverage && shareOverage.result === 'Pass';
-  if (sets === null || price === null) return '';
+  if (sets === null || price === null) return { family:'', planCode:'', resolved:false, conflict:'主產品使用組數或價格空白', rule:'Unable to match' };
   const matches = reference.filter(r =>
+    (!r.product || r.product === product) &&
     r.period === period &&
     referenceValuesEqual_(r.sets, sets) &&
     numbersEqualAllowNull_(r.bonus, bonus) &&
@@ -1059,7 +2683,61 @@ function inferRsvPlanFamily_(rows, ix, reference, shareOverage) {
     (ignoreOverage || numbersEqualAllowNull_(r.overage, overage))
   );
   const families = [...new Set(matches.map(r => r.family))];
-  return families.length === 1 ? families[0] : '';
+  const listed = !!(origin && origin.listed);
+  const expected = normalPlanFamily_(options.expectedFamily);
+  const isOriginal = options.mode === 'original';
+  let family = '';
+  let conflict = '';
+  let rule = '';
+  if (origin && origin.conflict) {
+    conflict = origin.conflict;
+    rule = 'Legacy membership 重複，停止方案世代判斷';
+  } else if (!families.length) {
+    family = 'Special';
+    rule = '完整組合未匹配 Public／BD New，判定 Special';
+  } else if (isOriginal && families.length === 1) {
+    family = families[0];
+    if (family === 'BD New' && listed) {
+      conflict = 'Branch 已列入 Legacy Branch Master，但舊方案完整組合只匹配 BD New，Legacy membership 與方案家族衝突，需人工確認';
+      rule = '舊方案唯一匹配 BD New，但 Legacy membership 阻擋自動分類';
+    } else {
+      rule = '舊方案完整組合唯一匹配 ' + family + '，續約維持原家族' +
+        (family === 'Public' && !listed ? '；雖不在 Legacy，仍依唯一 Public 組合延續' : '');
+    }
+  } else if (isOriginal) {
+    family = listed ? 'Public' : 'BD New';
+    rule = '舊方案完整組合同時匹配 Public／BD New，依 ' +
+      (listed ? '列入 Legacy Branch Master 選擇 Public' : '未列入 Legacy Branch Master 選擇 BD New');
+  } else if (families.length === 1) {
+    family = families[0];
+    rule = '新方案完整組合唯一匹配 ' + family;
+  } else if (expected && families.includes(expected)) {
+    family = expected;
+    rule = '新方案完整組合同時匹配 Public／BD New，依舊方案家族選擇 ' + expected;
+  } else {
+    conflict = '新方案完整組合同時匹配 Public／BD New，但無法從舊方案家族決定續約家族';
+    rule = '新方案重複組合需維持舊方案家族';
+  }
+  if (ignoreOverage) rule += '；Share Plan 超額單價依組內最高值正規化';
+  const familyMatches = matches.filter(r => !family || r.family === family);
+  const planCodes = [...new Set(familyMatches.map(r => r.planCode).filter(Boolean))];
+  const sourceCatalogs = [...new Set(familyMatches.map(r => r.catalog).filter(Boolean))];
+  return {
+    family, planCode: planCodes.join(', '), resolved: !!family && !conflict,
+    sourceCatalog: sourceCatalogs.length === 1 ? sourceCatalogs[0] : '',
+    conflict, rule, matches: familyMatches
+  };
+}
+
+function rsvPlanSummary_(product, period, sets, bonus, price, overage) {
+  return [
+    product,
+    period,
+    '使用 ' + auditFormatNumber_(sets) + ' 組',
+    '贈送 ' + auditFormatNumber_(bonus) + ' 組',
+    '價格 ' + auditFormatNumber_(price) + ' 元',
+    '超額 ' + auditFormatNumber_(overage) + ' 元'
+  ].join('／');
 }
 
 function referenceValuesEqual_(a, b) {
@@ -1131,6 +2809,8 @@ function auditNumber_(value) {
 }
 
 function auditFormatNumber_(value) {
+  if (value === null || value === undefined || value === '') return '空白';
+  if (!isFinite(Number(value))) return auditText_(value);
   return Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 });
 }
 
@@ -1149,59 +2829,146 @@ function billingCycleAudit_(review, queueRows, qx) {
   }
   const hasAnnualMain = mainPeriods.includes('annual');
   if (!hasAnnualMain) return { result: 'Pass', reason: '' };
-  const pricedRows = queueRows.filter(r => auditText_(auditGet_(r.values, qx, '合約價格', true)) !== '');
-  const mainTotal = pricedRows.filter(r => isMainProduct_(auditText_(auditGet_(r.values, qx, '產品', true))))
-    .reduce((sum, r) => sum + Number(auditGet_(r.values, qx, '合約價格', true) || 0), 0);
-  const addOnRows = pricedRows.filter(r => !isMainProduct_(auditText_(auditGet_(r.values, qx, '產品', true))));
-  const positiveAddOns = addOnRows.filter(r => Number(auditGet_(r.values, qx, '合約價格', true) || 0) > 0);
+  const fixedRows = queueRows.filter(r => isFixedContractPriceProduct_(auditText_(auditGet_(r.values, qx, '產品', true))));
+  const fixedDetails = fixedRows.map(r => ({
+    product: auditText_(auditGet_(r.values, qx, '產品', true)),
+    period: auditText_(auditGet_(r.values, qx, '付款週期', true)).toLowerCase(),
+    price: auditNumber_(auditGet_(r.values, qx, '合約價格', true))
+  }));
+  const positiveAddOns = fixedDetails.filter(r => !isMainProduct_(r.product) && r.price !== null && r.price > 0);
   // The annual lump sum is only needed to distinguish annual from monthly
   // billing when at least one add-on has a positive recurring charge.  A
   // main-product-only renewal (including a Share-plan member) and zero-fee
   // add-ons cannot be ambiguous for this purpose.
   if (!positiveAddOns.length) return { result: 'Pass', reason: '' };
-  const raw = auditText_(review['Annual Payment Amount (NTD)']).replace(/[,，\s$NTD]/gi, '');
-  if (raw === '') return { result: 'Need Review', reason: '尚未填入信件／合約中的年繳總金額，無法確認正費用附加服務為年繳或月繳' };
-  const amount = Number(raw);
-  if (!isFinite(amount)) return { result: 'Need Review', reason: '年繳總金額格式無法判讀，請填入純數字金額' };
-  const allTotal = pricedRows.reduce((sum, r) => sum + Number(auditGet_(r.values, qx, '合約價格', true) || 0), 0);
-  if (Math.abs(amount - allTotal) <= 1) return { result: 'Pass', reason: '' };
-  if (Math.abs(amount - mainTotal) <= 1 && positiveAddOns.length) {
-    return { result: 'Need Review', reason: 'add-on 可能為月繳，請人工確認' };
+  const unsupported = positiveAddOns.filter(r => r.period !== 'annual' && r.period !== 'monthly');
+  if (unsupported.length) {
+    return { result:'Need Review', reason:'正費用 add-on 付款週期空白或不支援：' + billingPriceSummary_(unsupported) };
   }
-  return { result: 'Fail', reason: '信件／合約年繳總金額與 Queue 的主產品年費或主產品加附加服務年費皆不一致' };
-}
-
-function planComplianceAudit_(review, planChange, inferredFamilies) {
-  const oldFamily = normalPlanFamily_(inferredFamilies && inferredFamilies.oldFamily) ||
-    normalPlanFamily_(review['Original Plan Family']);
-  const newFamily = normalPlanFamily_(inferredFamilies && inferredFamilies.newFamily) ||
-    normalPlanFamily_(review['New Plan Family']);
-  const fullMatch = isPass_(review['Complete Plan Match']);
-  if (!oldFamily || !newFamily || !fullMatch) {
-    // Exact original-plan renewals (including the approved add-on billing
-    // cycle conversion) are already compared against the original TPR by
-    // classifyAction_.  A blank family review must not block them.
-    if (!planChange) {
-      return { oldFamily: '', newFamily: '', result: 'Pass', specialCase: 'Not Required', reason: '原方案完整組合已與原始 TPR 比對一致。' };
-    }
-    return { oldFamily: oldFamily || 'Unknown', newFamily: newFamily || 'Unknown', result: 'Need Check', specialCase: 'Unknown', reason: '尚未由方案參照表確認舊／新方案家族與完整組合' };
+  const annualRows = fixedDetails.filter(r => r.period === 'annual');
+  const invalidAnnual = annualRows.filter(r => r.price === null);
+  if (invalidAnnual.length) {
+    return { result:'Need Review', reason:'Queue annual 產品合約價格空白或無法判讀：' + billingPriceSummary_(invalidAnnual) };
   }
-  if (oldFamily === 'Special' && newFamily === 'Special' && !planChange) {
-    return { oldFamily, newFamily, result: 'Pass', specialCase: 'Grandfathered', reason: '' };
-  }
-  if (oldFamily === 'Special' && newFamily === 'Public') {
+  const annualTotal = annualRows.reduce((sum, r) => sum + r.price, 0);
+  const summary = billingPriceSummary_(annualRows);
+  const rawAmount = auditText_(review['Annual Payment Amount (NTD)']);
+  const evidenceQuote = auditText_(review['Annual Payment Evidence Quote']);
+  const evidenceLocation = auditText_(review['Annual Payment Evidence Location']);
+  if (!rawAmount || !evidenceQuote || !evidenceLocation) {
+    const missing = [];
+    if (!rawAmount) missing.push('Annual Payment Amount');
+    if (!evidenceQuote) missing.push('Evidence Quote');
+    if (!evidenceLocation) missing.push('Evidence Location');
     return {
-      oldFamily,
-      newFamily,
-      result: 'Pass',
-      specialCase: 'StandardizedToPublic',
-      reason: '原特殊方案已改為完整公版方案；雙方用印由合約檢核確認。'
+      result: 'Need Review',
+      reason: '年繳總金額證據不完整：缺少 ' + missing.join('、') + '；目前文件金額欄位「' +
+        (rawAmount || '未填') + '」，Queue annual 合約價格合計 ' + auditFormatNumber_(annualTotal) + ' 元（' + summary +
+        '）。請從合約／完整 Email 串逐字補齊，不得由 Queue 加總回推'
     };
   }
-  if ((oldFamily === 'Public' && newFamily === 'Public') || (oldFamily === 'BD New' && newFamily === 'BD New')) {
-    return { oldFamily, newFamily, result: 'Pass', specialCase: 'Not Required', reason: '' };
+  const amount = exactCurrencyAmount_(rawAmount);
+  if (amount === null) return { result:'Need Review', reason:'年繳總金額格式無法嚴格判讀：「' + rawAmount + '」' };
+  if (!evidenceQuoteContainsAmount_(evidenceQuote, amount)) {
+    return {
+      result:'Need Review',
+      reason:'年繳總金額證據原文未出現填入金額 ' + auditFormatNumber_(amount) + ' 元，請重新從文件擷取'
+    };
   }
-  return { oldFamily, newFamily, result: 'Pass', specialCase: 'Required', reason: '' };
+  if (amount !== annualTotal) {
+    return {
+      result:'Fail',
+      reason:'年繳總額不一致：文件 ' + auditFormatNumber_(amount) + ' 元；Queue annual 合約價格合計 ' +
+        auditFormatNumber_(annualTotal) + ' 元（' + summary + '）。請人工確認並修正 Queue 付款週期或金額'
+    };
+  }
+  const monthlyAddOns = positiveAddOns.filter(r => r.period === 'monthly');
+  if (monthlyAddOns.length) {
+    return {
+      result:'Pass',
+      requiresDualSeal:true,
+      annualPaymentAmount:amount,
+      annualQueueTotal:annualTotal,
+      reason:'文件年繳總額 ' + auditFormatNumber_(amount) + ' 元與 Queue annual 合計一致；正費用月繳 add-on：' +
+        billingPriceSummary_(monthlyAddOns)
+    };
+  }
+  return { result:'Pass', reason:'', annualPaymentAmount:amount, annualQueueTotal:annualTotal };
+}
+
+function isFixedContractPriceProduct_(product) {
+  const normalized = auditText_(product);
+  // Deposit-Commission rows represent percentage / transaction charges, not
+  // a fixed contract price.  Treat every other named product as fixed so a
+  // newly introduced recurring add-on cannot be silently omitted.
+  return !!normalized && normalized.toLowerCase().indexOf('deposit-commission') !== 0;
+}
+
+function billingPriceSummary_(rows) {
+  return rows.map(r => r.product + ' ' + (r.period || '週期空白') + ' ' + auditFormatNumber_(r.price) + ' 元').join('；');
+}
+
+function exactCurrencyAmount_(value) {
+  let text = auditText_(value);
+  if (!text) return null;
+  if (text.normalize) text = text.normalize('NFKC');
+  text = text.replace(/(?:新台幣|新臺幣|NT\$|NTD|TWD|\$|元)/gi, '').replace(/[,，\s]/g, '');
+  if (!/^\d+(?:\.\d+)?$/.test(text)) return null;
+  const amount = Number(text);
+  return isFinite(amount) && amount >= 0 ? amount : null;
+}
+
+function evidenceQuoteContainsAmount_(quote, expectedAmount) {
+  let text = auditText_(quote);
+  if (text.normalize) text = text.normalize('NFKC');
+  const candidates = text.match(/\d[\d,，]*(?:\.\d+)?/g) || [];
+  return candidates.some(candidate => exactCurrencyAmount_(candidate) === expectedAmount);
+}
+
+function planComplianceAudit_(review, planChange, inferredPlans, origin) {
+  const oldPlan = inferredPlans && inferredPlans.oldPlan || {};
+  const newPlan = inferredPlans && inferredPlans.newPlan || {};
+  const oldFamily = normalPlanFamily_(oldPlan.family) || normalPlanFamily_(review['Original Plan Family']);
+  const newFamily = normalPlanFamily_(newPlan.family) || normalPlanFamily_(review['New Plan Family']);
+  const expectedFamily = oldFamily === 'Special'
+    ? (origin && origin.listed ? 'Public' : 'BD New')
+    : oldFamily;
+  const trace = {
+    oldPlanCode: auditText_(oldPlan.planCode), newPlanCode: auditText_(newPlan.planCode),
+    oldSourceCatalog: auditText_(oldPlan.sourceCatalog), newSourceCatalog: auditText_(newPlan.sourceCatalog),
+    expectedFamily: expectedFamily,
+    matchRule: ['原方案：' + auditText_(oldPlan.rule), '新方案：' + auditText_(newPlan.rule)].filter(Boolean).join('；')
+  };
+  const conflicts = [auditText_(oldPlan.conflict), auditText_(newPlan.conflict)].filter(Boolean);
+  if (isExplicitFail_(review['Complete Plan Match'])) {
+    conflicts.push('Plan Classification Review 已人工標記 Complete Plan Match 不通過，需人工確認完整方案組合');
+  }
+  if (conflicts.length) {
+    return Object.assign({ oldFamily:oldFamily || 'Unknown', newFamily:newFamily || 'Unknown', result:'Need Check', specialCase:'Unknown', reason:conflicts.join('；') }, trace);
+  }
+  if (!oldFamily || !newFamily) {
+    return Object.assign({ oldFamily:oldFamily || 'Unknown', newFamily:newFamily || 'Unknown', result:'Need Check', specialCase:'Unknown', reason:'尚未由方案參照表與 Legacy membership 確認舊／新方案家族' }, trace);
+  }
+  if (oldFamily === 'Special' && newFamily === 'Special' && !planChange) {
+    return Object.assign({ oldFamily, newFamily, result:'Pass', specialCase:'Grandfathered', reason:'' }, trace);
+  }
+  if (oldFamily === 'Special' && newFamily === expectedFamily) {
+    return Object.assign({
+      oldFamily,
+      newFamily,
+      expectedFamily,
+      result: 'Pass',
+      specialCase: 'StandardizedToExpected',
+      reason: '原特殊方案已改為 Legacy membership 對應的完整 ' + expectedFamily + ' 標準方案；雙方用印由合約檢核確認。'
+    }, trace);
+  }
+  if ((oldFamily === 'Public' && newFamily === 'Public') || (oldFamily === 'BD New' && newFamily === 'BD New')) {
+    return Object.assign({ oldFamily, newFamily, expectedFamily, result:'Pass', specialCase:'Not Required', reason:'' }, trace);
+  }
+  return Object.assign({
+    oldFamily, newFamily, expectedFamily, result:'Pass', specialCase:'Required',
+    reason:'方案家族由 ' + oldFamily + ' 變更為 ' + newFamily + '，需特殊申請核准'
+  }, trace);
 }
 
 function specialApprovalAudit_(plan, review, nonFullYearAnnualRenewal) {
@@ -1211,11 +2978,11 @@ function specialApprovalAudit_(plan, review, nonFullYearAnnualRenewal) {
       ? { required: 'Yes', status: 'Approved', reason: '' }
       : { required: 'Yes', status: unresolvedApprovalStatus_(review), reason: '年繳續約期間非完整一年，需特殊申請核准、佐證連結、覆核者與日期' };
   }
-  if (plan.specialCase === 'StandardizedToPublic') {
+  if (plan.specialCase === 'StandardizedToExpected') {
     return {
       required: 'No',
       status: 'Not Required',
-      reason: '原特殊方案改為完整公版方案，不需額外特殊申請；雙方用印由合約檢核確認'
+      reason: '原特殊方案改為 Legacy membership 對應的完整標準方案，不需額外特殊申請；雙方用印由合約檢核確認'
     };
   }
   if (plan.specialCase === 'Not Required') return { required: 'No', status: 'Not Required', reason: '' };
@@ -1386,8 +3153,209 @@ function shareAudit_(rows, qx, reviews, sourceAudit) {
     : { result: 'Need Check', reason: 'Share Plan 已確認 Renewal DB／Queue 最高超額單價，但尚未確認完整成員、統編、合約期間與合約超額條件' };
 }
 
-function decideAuditStatus_(renewalDataMissing, sourceDates, longTerm, contract, bonus, plan, special, share) {
+function pendingCatalogChangeAudit_(oldRows, queueRows, tx, qx, pendingChanges, branchId, planAudit) {
+  if (!pendingChanges || !pendingChanges.length) return { result:'Pass', reason:'', changeIds:[] };
+  const planCodes = new Set([auditText_(planAudit && planAudit.oldPlanCode), auditText_(planAudit && planAudit.newPlanCode)]
+    .join(',').split(',').map(value => value.trim()).filter(Boolean));
+  const oldRecord = mainPlanRecordFromRows_(oldRows, tx, planAudit && planAudit.oldFamily, planAudit && planAudit.oldSourceCatalog);
+  const newRecord = mainPlanRecordFromRows_(queueRows.map(row => row.values), qx, planAudit && planAudit.newFamily, planAudit && planAudit.newSourceCatalog);
+  const unresolved = [];
+  const hits = pendingChanges.filter(change => {
+    if (planCodes.size) return planCodes.has(change.planCode);
+    return [change.oldValuesJson, change.newValuesJson].some(json => {
+      const record = parsePlanRecord_(json);
+      if (!record) return false;
+      const candidates = [oldRecord, newRecord].filter(candidate => sameMainPlanBusinessRecord_(candidate, record));
+      if (!candidates.length) return false;
+      if (candidates.some(candidate => sameMainPlanRecord_(candidate, record))) return true;
+      if (candidates.some(candidate => !candidate.family || !candidate.sourceCatalog)) unresolved.push(change);
+      return false;
+    });
+  });
+  if (!hits.length && unresolved.length) {
+    const codes = [...new Set(unresolved.map(change => change.planCode).filter(Boolean))].join(', ');
+    return {
+      result:'Need Check',
+      reason:'方案商業值與待核准 Catalog 異動相同，但缺少唯一 Plan Code／家族／來源目錄，無法確認是否受方案 ' + codes + ' 影響，需人工確認',
+      changeIds:[...new Set(unresolved.map(change => change.changeId))], branchId
+    };
+  }
+  if (!hits.length) return { result:'Pass', reason:'', changeIds:[] };
+  const details = hits.map(change => {
+    const oldRecordValue = parsePlanRecord_(change.oldValuesJson);
+    const newRecordValue = parsePlanRecord_(change.newValuesJson);
+    const status = auditText_(change.approvalStatus) || 'Pending';
+    return '方案 ' + change.planCode + ' ' + change.changeType + ' 尚未核准（狀態：' + status + '）：' +
+      describePlanRecord_(oldRecordValue) + ' → ' + (newRecordValue ? describePlanRecord_(newRecordValue) : '停用');
+  });
+  return { result:'Need Check', reason:details.join('；'), changeIds:hits.map(change => change.changeId), branchId };
+}
+
+function mainPlanRecordFromRows_(rows, ix, family, sourceCatalog) {
+  const main = rows.find(row => isMainProduct_(auditText_(auditGet_(row, ix, '產品', true))));
+  if (!main) return null;
+  const rawBonus = auditNumber_(auditGet_(main, ix, '合約贈送組數', true));
+  return {
+    family: normalPlanFamily_(family),
+    sourceCatalog: auditText_(sourceCatalog),
+    billing: referenceBillingPeriod_(auditGet_(main, ix, '付款週期', true)),
+    product: auditText_(auditGet_(main, ix, '產品', true)),
+    sets: referenceReservationSets_(auditGet_(main, ix, '合約組數', true)),
+    bonus: rawBonus === null ? 0 : rawBonus,
+    price: auditNumber_(auditGet_(main, ix, '合約價格', true)),
+    overage: auditNumber_(auditGet_(main, ix, '超額每組單價', true))
+  };
+}
+
+function parsePlanRecord_(json) {
+  if (!auditText_(json)) return null;
+  try { return JSON.parse(json); } catch (error) { return null; }
+}
+
+function sameMainPlanRecord_(left, right) {
+  if (!left || !right) return false;
+  return !!left.family && !!left.sourceCatalog &&
+    left.family === normalPlanFamily_(right.family) && left.sourceCatalog === auditText_(right.sourceCatalog) &&
+    sameMainPlanBusinessRecord_(left, right);
+}
+
+function sameMainPlanBusinessRecord_(left, right) {
+  if (!left || !right) return false;
+  return left.billing === right.billing && left.product === right.product &&
+    referenceValuesEqual_(left.sets, right.sets) && numbersEqualAllowNull_(left.bonus, right.bonus) &&
+    numbersEqualAllowNull_(left.price, right.price) && numbersEqualAllowNull_(left.overage, right.overage);
+}
+
+function describePlanRecord_(record) {
+  if (!record) return '無資料';
+  return [record.family, record.sourceCatalog, record.billing, record.product,
+    '使用 ' + auditFormatNumber_(record.sets), '贈送 ' + auditFormatNumber_(record.bonus),
+    '價格 ' + auditFormatNumber_(record.price), '超額 ' + auditFormatNumber_(record.overage)]
+    .filter(Boolean).join('／');
+}
+
+function recordPlanChangeAffectedBranches_(sheet, affected) {
+  if (!sheet || !Object.keys(affected).length) return;
+  const values = sheet.getDataRange().getValues();
+  const ix = headerIndex_(values[0].map(String));
+  const idColumn = requiredHeader_(ix, 'Change ID', sheet.getName());
+  const branchColumn = requiredHeader_(ix, 'Affected Branch IDs', sheet.getName());
+  let changed = false;
+  values.slice(1).forEach(row => {
+    const changeId = auditText_(row[idColumn]);
+    if (!affected[changeId]) return;
+    const existing = auditText_(row[branchColumn]).split(',').map(value => value.trim()).filter(Boolean);
+    const combined = [...new Set(existing.concat([...affected[changeId]]))].sort().join(', ');
+    if (row[branchColumn] !== combined) { row[branchColumn] = combined; changed = true; }
+  });
+  if (changed) sheet.getRange(2, 1, values.length - 1, values[0].length).setValues(values.slice(1));
+}
+
+function writePlanClassificationTraces_(sheet, traces, activeBatchId) {
+  if (!sheet || !traces || !traces.length) return;
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return;
+  const currentBatchId = auditText_(activeBatchId);
+  const requiredHeaders = [
+    'Branch ID', 'Original Plan Family', 'New Plan Family', 'First Contract Start Date',
+    'Expected Plan Family', 'Original Plan Code', 'New Plan Code', 'Catalog Match Rule',
+    'Catalog Exception', 'Origin Source'
+  ];
+  if (currentBatchId) requiredHeaders.push('Review Batch ID');
+  const plan = headerNameMigrationPlan_(values[0].map(String), requiredHeaders, sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' cannot write Plan Classification trace; missing headers: ' +
+      plan.missing.join(', '));
+  }
+  const branchColumn = plan.positions['Branch ID'];
+  const batchColumn = currentBatchId ? plan.positions['Review Batch ID'] : null;
+  const preflightErrors = [];
+  const targetRows = {};
+  const targetBranches = {};
+  const updates = traces.map((trace, index) => {
+    const label = 'trace ' + (index + 1);
+    const branchId = auditText_(trace && trace.branchId);
+    const rowNumber = Number(trace && trace.targetRowNumber);
+    const traceBatchId = auditText_(trace && trace.reviewBatchId);
+    if (!branchId) preflightErrors.push(label + ' 缺少 Branch ID');
+    if (currentBatchId && traceBatchId !== currentBatchId) {
+      preflightErrors.push(label + ' Review Batch ID 不一致：預期 ' + currentBatchId +
+        '，trace 為 ' + (traceBatchId || '空白'));
+    }
+    if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > values.length) {
+      preflightErrors.push(label + ' targetRowNumber 無效：' + auditText_(trace && trace.targetRowNumber));
+      return null;
+    }
+    if (targetRows[rowNumber]) {
+      preflightErrors.push('target row ' + rowNumber + ' 同時被 ' + targetRows[rowNumber] +
+        ' 與 ' + branchId + ' 指定');
+    } else {
+      targetRows[rowNumber] = branchId;
+    }
+    if (targetBranches[branchId]) {
+      preflightErrors.push('Branch ' + branchId + ' 有多個 writer targets：' +
+        targetBranches[branchId] + ', ' + rowNumber);
+    } else if (branchId) {
+      targetBranches[branchId] = rowNumber;
+    }
+    const row = values[rowNumber - 1];
+    const actualBranchId = auditText_(row[branchColumn]);
+    if (actualBranchId !== branchId) {
+      preflightErrors.push('row ' + rowNumber + ' Branch ID 已變更：預期 ' + branchId +
+        '，目前 ' + actualBranchId);
+    }
+    if (currentBatchId && auditText_(row[batchColumn]) !== currentBatchId) {
+      preflightErrors.push('row ' + rowNumber + ' Review Batch ID 已變更：預期 ' + currentBatchId +
+        '，目前 ' + (auditText_(row[batchColumn]) || '空白'));
+    }
+    const origin = trace && trace.origin || {};
+    const planAudit = trace && trace.planAudit || {};
+    const output = row.slice();
+    const put = (header, value) => { output[plan.positions[header]] = value; };
+    put('Original Plan Family', planAudit.oldFamily || '');
+    put('New Plan Family', planAudit.newFamily || '');
+    put('First Contract Start Date', origin.firstContractStart || '');
+    put('Expected Plan Family', planAudit.expectedFamily || planAudit.oldFamily || '');
+    put('Original Plan Code', planAudit.oldPlanCode || '');
+    put('New Plan Code', planAudit.newPlanCode || '');
+    put('Catalog Match Rule', planAudit.matchRule || '');
+    put('Catalog Exception', planAudit.reason || '');
+    put('Origin Source', origin.source || '');
+    return { rowNumber, values:output };
+  });
+
+  Object.keys(targetBranches).forEach(branchId => {
+    const candidateRows = [];
+    values.slice(1).forEach((row, index) => {
+      if (auditText_(row[branchColumn]) !== branchId) return;
+      if (!currentBatchId || auditText_(row[batchColumn]) === currentBatchId) {
+        candidateRows.push(index + 2);
+      }
+    });
+    const expectedRow = targetBranches[branchId];
+    const identityMatches = currentBatchId
+      ? candidateRows.length === 1 && candidateRows[0] === expectedRow
+      : candidateRows.length > 0 && candidateRows[0] === expectedRow;
+    if (!identityMatches) {
+      preflightErrors.push('Branch ' + branchId + ' 的最新 Sheet snapshot ' +
+        (currentBatchId
+          ? '在 Active Contract Review Batch「' + currentBatchId + '」必須只有 target row '
+          : '的 legacy first matching row 必須仍為 target row ') +
+        expectedRow + '；目前 rows：' + (candidateRows.length ? candidateRows.join(', ') : '無'));
+    }
+  });
+  if (preflightErrors.length) {
+    throw new Error(sheet.getName() + ' Plan Classification writer preflight failed: ' +
+      preflightErrors.join('；'));
+  }
+  updates.forEach(update => {
+    sheet.getRange(update.rowNumber, 1, 1, values[0].length).setValues([update.values]);
+  });
+}
+
+function decideAuditStatus_(renewalDataMissing, catalogChange, sourceDates, longTerm, contract, bonus, plan, special, share) {
   if (renewalDataMissing) return { status: 'Need Renewal Data', reason: 'Renewal DB 找不到或資料不足，已保留原始 TPR 方案。', note: 'Renewal DB 資料不足，已保留原始 TPR 方案，需補齊資料後再檢核。' };
+  if (catalogChange.result !== 'Pass') return { status:'Need Plan Catalog Review', reason:catalogChange.reason, note:catalogChange.reason + '。' };
   const manualReasons = [];
   if (sourceDates.result !== 'Pass') manualReasons.push(sourceDates.reason);
   if (longTerm.result === 'Need Check') manualReasons.push(longTerm.reason);
@@ -1406,12 +3374,31 @@ function decideAuditStatus_(renewalDataMissing, sourceDates, longTerm, contract,
   return { status: 'Ready', reason: '文件、方案與必要例外覆核皆已通過。', note: '文件、方案與必要例外覆核皆已通過。' };
 }
 
+function appendPlanDecisionReason_(decision, plan) {
+  if (!decision || !plan || plan.result === 'Pass' || !auditText_(plan.reason)) return decision;
+  if (auditText_(decision.reason).indexOf(auditText_(plan.reason)) >= 0) return decision;
+  const reason = auditText_(decision.reason) + '；方案分類：' + auditText_(plan.reason);
+  return Object.assign({}, decision, { reason, note: reason + '。' });
+}
+
 function normalPlanFamily_(value) {
   const v = auditText_(value).toLowerCase();
-  if (v === 'public' || v === '公版') return 'Public';
+  if (v === 'public' || v === '公版' || v === 'lite' || v === 'lite 方案' ||
+      v === 'email only' || v === 'email only 方案' || v === 'rsv public' ||
+      v === 'rsv public lite' || v === 'rsv public email only') return 'Public';
   if (v === 'bd new' || v === 'bd新方案' || v === 'bd') return 'BD New';
   if (v === 'special' || v === '特殊') return 'Special';
   return '';
+}
+function isExplicitFail_(value) {
+  if (value === false) return true;
+  return ['false', 'fail', 'failed', 'no', 'mismatch', 'mismatched', 'not matched', '不通過', '不一致']
+    .includes(auditText_(value).toLowerCase());
+}
+function isExplicitStructuredPlanVeto_(value) {
+  if (typeof value !== 'string') return false;
+  return ['false', 'fail', 'failed', '不通過', '不一致']
+    .includes(auditText_(value).toLowerCase());
 }
 function isPass_(value) { return value === true || ['true', 'pass', 'passed', 'yes', 'approved', 'matched', 'complete'].includes(auditText_(value).toLowerCase()); }
 function auditText_(value) {

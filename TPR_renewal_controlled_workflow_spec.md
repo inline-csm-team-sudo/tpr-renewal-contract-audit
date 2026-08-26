@@ -1,13 +1,13 @@
 # TPR 續約受控更新與合約稽核規格
 
-> 狀態：設計基準（不執行寫入）  
+> 狀態：受控實作基準（Build／Audit 只寫測試工作簿；Plan Code 維護須另行明確授權）
 > 本文件整合「TPR 續約測試工作區規格書」與「TPR 續約更新與合約稽核規格」。兩者有範圍差異時，以本文件的階段邊界為準。
 
 ## 1. 目的、範圍與不可違反原則
 
 本規格定義從舊 TPR、Renewal DB、文件證據與方案參照表產生 `TPR Update Queue` 的未來受控流程。目標是建立可追溯、可審核、以 Branch ID 為原子單位的續約更新機制。
 
-本階段**只產出資料模型、判斷規則、稽核欄位與驗收條件**。不得修改 Google Apps Script、建立或寫入 Queue、修改測試工作簿、Renewal DB、方案參照表或正式 TPR。
+本階段允許經使用者要求修改 Google Apps Script，並寫入測試工作簿的 Queue、覆核表與方案管理表。Build Queue／Run Contract Audit 對正式 TPR、Renewal DB 與方案參照表一律唯讀；官方 RSV／RwG 方案表的永久 `Plan Code` 只能由另行授權的 explicit maintenance action 補入空白 cell。
 
 後續實作必須遵守：
 
@@ -26,12 +26,13 @@
 | --- | --- | --- | --- |
 | 正式 TPR | `1rZVU-n85eDh_ueaRyQojP8dSm4-MTeBz8frIyZynnb4` / `TPR` | 目前生效的舊方案、產品列、文件連結與原始列識別 | 唯讀 |
 | Renewal DB | `1tUOct-cJJY8854EAph9D0cxfiKz4qD1HFR2nXkPKWnc` / `{YYYYMM}` | 本次新方案初稿 | 唯讀 |
-| 方案參照表 | `1QhNSdtg5TueFSoNBY8lFxXbtp_UktY1g8l7EUQWJ5kU` / `公版方案`、`BD 新方案`、`訂金方案` | RSV／Deposit 合規目錄 | 唯讀 |
-| 測試工作簿 | `1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4` | 未來唯一可寫入的測試與稽核區 | 本階段不寫入 |
+| RSV／RwG 方案參照表 | `10ECF2b0yu6loRZqDl_4ynHOuc2yz-IAUjPirCj-dxvM` / `TMS 方案` | 公版、BD 新方案、Lite、Email Only 合規目錄 | 唯讀 |
+| Deposit 方案參照表 | `1QhNSdtg5TueFSoNBY8lFxXbtp_UktY1g8l7EUQWJ5kU` / `訂金方案` | Deposit 合規目錄 | 唯讀 |
+| 測試工作簿 | `1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4` | 唯一可寫入的測試與稽核區 | Queue、覆核表與方案管理表可依受控流程寫入 |
 | G 欄文件／信件 | 原始 TPR 的文件連結 | 客戶同意、用印與實際方案事實 | 唯讀；掃描件須逐頁目視覆核 |
 | 特殊申請核准紀錄 | 待指定 | 例外方案的授權證據 | 未指定即 `Unknown` |
 
-來源資料必須經 Google Sheets API 或等效唯讀介面擷取。不得寫入來源表。已知測試基準為 `TEST-202607-001`（31 Branch ID／34 個 TPR 產品列）及 `TEST-202608-001`（3 Branch ID／5 個 TPR 產品列）；每一個月份必須是獨立 Batch，不得合併。
+來源資料原則上必須經 Google Sheets API 或等效唯讀介面擷取。Build／Audit 不得寫入正式 TPR、Renewal DB 或方案參照表；每次仍唯讀最新 `TMS 方案` 做 Catalog diff。supported plan row 缺永久代碼時 fail closed，經使用者授權後另行執行 `maintainPlanCodes()`，只補空白 Plan Code cell。已知測試基準為 `TEST-202607-001`（31 Branch ID／34 個 TPR 產品列）及 `TEST-202608-001`（3 Branch ID／5 個 TPR 產品列）；每一個月份必須是獨立 Batch，不得合併。
 
 ## 3. 未來測試工作簿與批次模型
 
@@ -40,9 +41,12 @@
 | `Control` | Batch ID、Renewal Month、Branch ID 清單與唯讀設定 | 僅批次與月份 |
 | `Field Mapping` | 來源欄位資料字典 | 經審核後 |
 | `TPR Snapshot`、`Renewal DB Snapshot` | 原始值、來源 ID、分頁、列號、擷取時間 | 否 |
-| `Plan Reference Mapping`、`Plan Reference Snapshot` | 方案版面解析及本批方案快照 | Mapping 經審核後；Snapshot 否 |
+| `Plan Reference Mapping`、`Plan Reference Snapshot` | 方案版面解析及本批方案快照 | RSV／RwG Mapping 與 Snapshot 由同步維護；Deposit Mapping 經審核後 |
+| `Legacy Branch Master` | Legacy cohort 的 Branch ID membership；首約日若存在只供追溯 | 由業務維護；未來新增 ID 應填 Reason／Notes |
+| `Canonical Plan Catalog`、`Plan Catalog Change Review` | 永久 Plan Code、版本、停用與方案異動審核 | Catalog 由同步維護；異動狀態由覆核者確認 |
 | `Product Expansion Rules` | Renewal DB 單列展開產品列的規則 | 業務維護 |
 | `TPR Update Queue` | 預計寫回資料、檢查結果與稽核資訊 | 流程寫入；修正須留下紀錄 |
+| `Contract Evidence Review` | Branch-level evidence facts、Structured Contract Data 及程式計算的 Document Match | Reader 只寫 provider-neutral extraction facts；Result／Detail 只由 Apps Script 寫入 |
 | `Audit Log` | 匯入、人工決策、狀態及寫回事項 | 僅新增 |
 | `Manual Exception Decisions` | 不續、漏填及例外的人工核准 | 經審核流程 |
 
@@ -72,6 +76,8 @@ TPR `TPR` 與 Renewal DB `{YYYYMM}` 的 header row 目前均為第 2 列，資�
 | `overage_type`、`overage_unit_price` | 超額計算方式、超額每組單價 | 新方案區塊的同名欄位 | 取第 2 個同名欄位 |
 | `tax_id` | — | `Tax reg number` | Share 統編唯一來源 |
 
+所有日期欄位在 Queue 以目標工作簿時區的純日期值儲存並顯示為 `yyyy-MM-dd`。跨 TPR、Renewal DB、Queue 與文件比較時，先正規化為 `yyyy-MM-dd`，只比較年月日；不得讓時、分、秒或 UTC offset 影響結果。
+
 Renewal DB 文件中曾以欄位字母描述資料位置，僅能作為目前觀察紀錄，**不可成為實作定位方式**。同名欄位（如 `Share ID`、`Overage type`、`Deposit`、`Voice`）必須同時滿足目標標題、`新合約方案` group 與第二次 occurrence。
 
 正規化時，方案表未列出的 RSV 贈送組數視為 `0`；但 `unlimited`、`-`、`未列`、`可使用`、`不可使用` 是不同語意，除明確規則外不得互換。
@@ -93,7 +99,7 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 
 ## 6. 產品展開、差異分類與人工例外
 
-預設產品鍵為 `RSV`、`Deposit`、`Deposit-Commission / Credit Card`、`Deposit-Commission / Virtual ATM`、`Voice`、`Survey`、`eCoupon`、`RwG`。每個 `Product Expansion Rule` 至少須定義啟用條件、來源 canonical fields、Queue 產品列、Blank／Zero／FALSE 語意、明確不續訊號、價格／週期欄位、合約必填欄位與合規範圍。
+預設產品鍵為 `RSV`、`Deposit`、`Deposit-Commission / Credit Card`、`Deposit-Commission / Virtual ATM`、`Voice`、`Survey`、`eCoupon`、`RwG`。`Deposit-Commission` 產品鍵只適用於 B2C；B2B 交易服務費依既有 `Deposit` 欄位處理，不展開 Commission product row。每個 `Product Expansion Rule` 至少須定義啟用條件、來源 canonical fields、Queue 產品列、Blank／Zero／FALSE 語意、明確不續訊號、價格／週期欄位、合約必填欄位與合規範圍。
 
 在業務規則尚未確認前，預設為：所有產品 blank 均 `NEED_MANUAL_REVIEW`；Deposit、兩種 Deposit-Commission 與 RwG 的 `0` 是有效值且保留產品；Virtual ATM 的 `FALSE` 最多是 `Close Candidate`；任何 `Close/Remove` 僅能由已核准人工例外確認。
 
@@ -107,6 +113,8 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 
 關鍵條件至少包括產品、付款週期、組數、贈送組數、價格、Share ID、超額方式／單價、Deposit 類型、月費、建立費、費率與功能組合。
 
+唯一的付款週期正規化例外是：原方案為年繳主產品搭配正費用月繳 add-on，續約 Queue 將該 add-on 改為 `月費 × 12` 的 annual 表示。此 `monthly → annual` 是單向正規化，不視為 `Update`；反向 `annual → monthly`、RSV 週期變更或其他付款週期改變仍是實質變更。
+
 `Manual Exception Decisions` 至少包含 Batch ID、Branch ID、Product Key、Decision、Reason、Evidence URL、Reviewer、Reviewed At、Queue Action、Status。只有 `Close/Remove` 且 Evidence URL、Reviewer、Reviewed At 完整、Status=`Approved` 時，才可確認不續；`Missing Renewal Data` 會使整個 Branch ID 不可 Ready。人工決策不得覆寫 Snapshot。
 
 ## 7. 文件、合約與 Queue 最終值
@@ -115,15 +123,39 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 
 掃描或拍照 PDF 需逐頁目視餐廳名稱，以及必要時 inline／客戶雙方印章；OCR 僅能輔助。應閱讀完整信件串，並以最新、明確內容覆核。
 
+文件連結可以是 Drive 單一檔案或資料夾；資料夾必須展開並閱讀全部相關檔案。覆核 ID 綁定 Queue 連結本身的檔案 ID／資料夾 ID，且 `/file/d/<id>`、`/d/<id>`、`/folders/<id>` 與 `?id=<id>` 均須正確解析。Queue 連結與覆核 ID 不一致時必須 fail closed，不能沿用舊結論。
+
+新版文件覆核以 `Structured Review Version=1` 與 provider-neutral `Structured Contract Data` 作為 extraction interface。`Active Contract Review Batch ID` 有值時，只以相同 `Review Batch ID` 的 current-batch rows 作為本次 evidence identity；每個 Queue Branch 必須恰好一列，其他／blank batch rows 均為 historical。Current-batch row 本身代表 structured intent；Version／JSON 任一缺失、無效、schema 不支援或 extraction 無法完成時必須 `NEEDS_REVIEW`，不得 fallback 到 historical `Full Plan Match=TRUE`。只有 Active Batch ID 空白的 legacy mode 才保留原本 selection 與 fallback。
+
+Active Batch identity 必須同時用於 evidence index 與 Document Match writer。Index 缺少 current-batch Branch row或遇到 duplicate 時 fail closed並列出 rows；其他 batch 的舊 structured rows不得造成 conflict。Writer 真正寫入前以最新 Sheet snapshot 驗證 target row 的 Branch ID、Review Batch ID、current-batch 唯一性、Version 與 JSON snapshot；任一變更均 zero writes。Active Batch ID 空白時才沿用原本 legacy structured-intent／writer 行為。
+
+`Plan Classification Review` 的 read identity 與 trace writer 亦使用 `Branch ID + Active Contract Review Batch ID`。Active Batch 有值時，每個 Queue Branch 必須恰好一筆 current-batch row；缺列、duplicate、indexing 後 Branch／Batch／row identity 改變都在任何 Plan trace write 前 fail closed 並全批 zero writes。其他／blank batch rows 是 historical，不能參與判斷或被 writer 更新。Active Batch 空白時才保留 legacy first-matching-row read／write workflow。
+
+Schema 的 `evidence_set.state=Confirmed`、`complete=true` 必須代表已完成該 Branch relevant evidence set 盤點，並在 `relevant_source_ids` 列出全部 relevant files。Folder 不要求每一檔案建立 product rows，但只讀單一 PDF 不等於 evidence set complete；無法判定完整時使用 `Ambiguous`，Branch 不得 Ready。每個 product 的 `source_id` 必須屬於 relevant source IDs。
+
+Gemini 是目前優先 extraction reader，但 Apps Script 不依賴 Gemini-specific output。任何 reader 只輸出固定 schema 的文件事實與 `Confirmed`／`NotMentioned`／`Unreadable`／`Ambiguous`／`NotApplicable` states；Apps Script 才能計算並寫入 `Document Match Result` 與 `Document Match Detail`。Reader 提供的 MATCH／MISMATCH 欄位即使存在也沒有 authority。
+
+Structured mode 完全忽略 `Full Plan Match`；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可否決 calculated MATCH。blank、boolean `false` 或其他 token 都不是 structured veto。只有 legacy mode 維持原本 `Full Plan Match` 行為。
+
+RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；structured `billing_period` 使用 `NotApplicable` 且不參與 Document Comparison，不得依 Queue 或主產品猜測 monthly／annual，仍精確比較 payment method、commission／buy-in 與 row count。B2B 交易服務費只作為 B2B／Deposit 條文事實，不建立 Commission product row。固定費 Deposit 的 `monthly → annual ×12` 正規化維持不變。同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
+
+`Contract Evidence Review` migration 與所有 structured read／write 均依 header name 定位。已存在欄位 reuse，缺少欄位 append 到最右側，舊欄與舊 implementation 額外欄完整保留。新增 row 依 Sheet 實際欄寬建立，只填 Branch ID、Evidence URL、`Structured Review Version=1`。必要 header duplicate 或 mapping 無法唯一判定時，必須在任何 Sheet write 前停止。
+
+正常通過的 product 不強制保存 page、location 或 raw text；只有 mismatch、ambiguous、unreadable、bonus、annual total、Deposit commission／buy-in、consent、dual seal、special evidence 或人工覆核例外需在可取得時保留 locator。完整產品 multiset 必須逐項與 Queue 比較，包含 duplicate、missing／extra product、週期、組數、贈送、價格、Share、超額及 Deposit 條件。
+
+當 RSV／RwG 主產品為 annual 且存在正費用 add-on 時，`Contract Evidence Review` 必須保存文件明載的年繳總額、逐字原文與文件／Email 位置；不得由 Queue 加總回推。文件年繳總額必須與該 Branch 的 Queue 全部 annual 固定方案價格加總完全相等；monthly add-on 另由完整方案覆核比對月費，不納入年繳總額。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額。比較不允許金額誤差。
+
+RSV annual 但正費用 add-on 續約後仍為 monthly 時，屬 split-billing 例外。Queue 必須保留 monthly 週期與月費，文件年繳總額只包含 annual rows，並必須有雙方用印合約；完整 Email 同意不足。程式僅可將不一致寫為 Branch 層級 `Check=FALSE` 與具體 Note，不得自動改寫 Queue 價格或週期。
+
 | 合約與 Renewal DB 比較結果 | Queue 行為 |
 | --- | --- |
 | `Pass`：產品及必填條件一致 | 保留 DB 初稿，繼續合規檢查 |
-| `Fail`：有明確不一致 | 在 Difference 與 D 欄記錄雙方實際值；有效合約可修正 Queue |
+| `Fail`：有明確不一致 | 在 Difference、Status Reason 與 Queue Note 記錄雙方實際值；保持 `Check=FALSE`，不得由 audit 自動修正 Queue |
 | `Missing`：DB 必填資料不足 | `Need Renewal Data`，不可由合約靜默補成 Ready |
 | `Duplicate`：同 Branch ID DB 重複且無法判斷 | `Need Renewal Data`／`Need Check` |
 | `Need Check`：文件或資料無法辨識 | 不得推測 |
 
-Renewal DB 是初稿而非最終真實來源。有效文件修正 Queue A:W 時，必須記錄 Renewal DB 原值、合約值、修正欄位、理由、檢查者與時間，並重新執行文件、合約一致性、方案合規、特殊申請與雙方用印檢查。
+Renewal DB 是初稿而非最終真實來源。若使用者在 audit 之外另行授權依有效文件修正 Queue 方案欄位，必須記錄 Renewal DB 原值、合約值、修正欄位、理由、檢查者與時間，並重新執行文件、合約一致性、方案合規、特殊申請與雙方用印檢查；`runContractAudit` 本身只寫稽核結果，不自動改寫方案值。
 
 ## 8. Share Group 跨店家檢查
 
@@ -146,12 +178,15 @@ RSV 需以同一方案欄／列的完整組合比對付款週期、方案型態�
 
 RSV 家族與特殊申請判定：
 
+舊方案家族先依官方 Catalog 的完整組合判斷。只匹配 Public 時不論 Legacy membership 均屬 Public；只匹配 BD New 時須同時不在 Legacy，若已列入 Legacy 則為 conflict；同時匹配兩個家族時，列在 Legacy 選 Public，不在 Legacy 選 BD New。新方案重複匹配時維持舊家族。`first contract date` 不參與 runtime 分類，Duplicate Legacy Branch ID 必須阻擋受影響 Branch。`Complete Plan Match` 明確為 FALSE／Fail 時是人工 veto；TRUE 不得覆蓋自動 conflict。
+
 | 原方案分類 | 新方案分類／完整比對結果 | 特殊申請 |
 | --- | --- | --- |
 | Public | 完整匹配 Public | Not Required |
 | BD New | 完整匹配 BD New | Not Required |
 | Public ↔ BD New | 即使完整匹配新體系 | Required |
 | Special | 全部關鍵條件不變 | Grandfathered |
+| Special | 列在 Legacy 改為完整 Public；不在 Legacy 改為完整 BD New | Not Required；仍須雙方用印 |
 | Special | 任一關鍵條件改變 | Required 或 Unknown |
 | 任意 | 無法完整匹配同一組合 | Required |
 | 任意 | 關鍵欄位或 Share 規則無法辨識 | Unknown／Need Check |
@@ -165,11 +200,11 @@ Deposit 方案表的 2025 與 Existing Discount/Expansion 兩個區段都應匯�
 | `Approved` | 可以，仍須通過其他條件 |
 | `Pending`、`Rejected`、`Unknown` | 不可以 |
 
-RSV 方案表未列的贈送組數一律正規化為 `0`。BD 月繳 `1,500` 未提供完整價格／使用組數，不得自動建立或比對。Deposit 年繳是否一律採月費 × 12，尚待確認；未確認前應 `Need Check`。
+RSV 方案表未列的贈送組數一律正規化為 `0`。BD 月繳 `1,500` 未提供完整價格／使用組數，不得自動建立或比對。Deposit 由 monthly 正規化為 annual 時使用月費 × 12；任何不同的固定年繳金額都必須有文件明載並與 Queue 精確一致，不得自行推測折扣。
 
 ## 10. Note、狀態與 Ready 條件
 
-D 欄只寫適用段落，且應記錄具體值與下一步，例如 `[Renewal DB 檢查] Renewal DB RSV 使用組數為 3,600 組，合約為 7,200 組。`；不得只寫「無法確認」。適用的段落為：`[文件檢查]`、`[Renewal DB 檢查]`、`[RSV 方案合規]`、`[Deposit 方案合規]`、`[Share 方案]`、`[特殊申請]`、`[TPR 更新]`。
+Queue C 欄 `Note` 使用單行文字，不加 `[文件檢查]` 等分類前綴；必須直接記錄具體值、差異原因與下一步，例如 `Renewal DB RSV 使用組數為 3,600 組，合約為 7,200 組，請確認並修正 Renewal DB／Queue。`，不得只寫「無法確認」。技術追溯可另存於 `Difference` 與 `Status Reason`。
 
 每個 Branch ID 同一時間只能有一個主狀態；其他原因保存於 Status Reason、Difference 與 Note。優先序如下：
 
@@ -201,21 +236,19 @@ D 欄只寫適用段落，且應記錄具體值與下一步，例如 `[Renewal D
 
 1. 新增或插入來源欄後，Mapping 仍能唯一定位正確欄位。
 2. Mapping 歧義、缺來源、重複 DB 或必填欄位不足時，系統從不猜測。
-3. 每批都有不可變 Snapshot 與只新增的 Audit Log。
+3. 每批都有不可變 Snapshot 與只新增的 Audit Log；Build Queue 記為 `Operation=Build Queue`，合約稽核記為 `Operation=Contract Audit`。
 4. 原 TPR 有產品而新資料空白時，永不自動 `Close/Remove`。
 5. 方案驗證無法跨欄或跨列拼湊。
 6. Branch 或 Share Group 任一成員未通過時，交易單位不會 Ready。
-7. 未取得獨立明確授權前，流程不會寫回任何測試或正式工作簿。
+7. 測試工作簿只在使用者要求執行 Build Queue／audit 時寫入；未取得獨立明確授權前，流程不會寫回正式 TPR。
 
 ## 12. 待確認規則（預設阻擋）
 
 下列問題未取得正式答案前，相關案例必須為 `Need Check` 或 `Special Approval Unknown`：
 
 1. RwG 是否為 RSV 的零元方案或獨立 Add-on，以及其必填欄位。
-2. Deposit 年繳是否固定為月費 × 12，是否容許折扣或例外。
-3. 特殊申請核准紀錄的來源、必要欄位與有效期間。
-4. Renewal DB 的明確不續欄位／值，以及各產品的展開規則。
-5. 正式 TPR 對 `Close/Remove` 的結束日、解約原因與歷史列處理方式。
-6. 是否存在由法務明定、可替代雙方用印的文件形式。
-7. 同一 Branch ID 的產品期間不同時是否支援。
-8. Deposit-Commission 的信用卡與 Virtual ATM 是否必須是獨立產品列。
+2. 特殊申請核准紀錄的來源、必要欄位與有效期間。
+3. Renewal DB 的明確不續欄位／值，以及各產品的展開規則。
+4. 正式 TPR 對 `Close/Remove` 的結束日、解約原因與歷史列處理方式。
+5. 是否存在由法務明定、可替代雙方用印的文件形式。
+6. 同一 Branch ID 的產品期間不同時是否支援。

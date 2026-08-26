@@ -4,7 +4,7 @@
 
 本流程將 TPR 中標示需續約檢查的分店，依 Renewal DB 的「新方案」轉成正式 TPR 格式的 Queue，並以合約／信件、方案規則、特殊申請及 Share Plan 條件進行稽核。
 
-流程只可寫入測試工作表的 `TPR Update Queue` 與覆核表；**不得寫回原始 TPR、Renewal DB 或方案參照來源**。
+流程只可寫入測試工作表的 Queue、覆核表與方案管理表；**Build Queue／Run Contract Audit 不得寫回原始 TPR、Renewal DB 或任何方案參照表**。官方 RSV／RwG 方案表的永久 `Plan Code` 只能在使用者另行授權並明確執行 `maintainPlanCodes()` 時補入空白 cell。
 
 最終輸出為 Queue 前方的：
 
@@ -45,7 +45,7 @@
 1. 先複製原始 TPR 被勾選的產品列作為 Queue 基底，不可只生成方案欄位。
 2. 必須保留分店名稱、AM、Sales、Demand、Comment、合約連結與原始 TPR 後段欄位。
 3. 原始 TPR 的 `H:AO` 更新資訊必須一併帶到 Queue。
-4. 日期必須與 Renewal DB 完全相同，不得因時區轉換少一天。
+4. 日期必須與 Renewal DB 完全相同，不得因時區轉換少一天。Queue 以目標工作簿時區寫入不含時間成分的日期值；所有日期判斷先正規化為 `yyyy-MM-dd`，只比較年月日並忽略時、分、秒。
 5. 合約贈送組數格式至少為小數點後 2 位；超額每組單價至少為小數點後 3 位。
 
 ### 4.2 Renewal DB 新方案覆寫
@@ -70,7 +70,7 @@
 | --- | --- |
 | `RSV`、`RwG` | 新主產品、組數、贈送組數、價格、Share Plan、超額計算與單價均由 Renewal DB 新方案帶入 |
 | `Deposit` | 帶入付款週期、訂金費用、B2B/B2C 類型、設定費；B2B 的佣金組數依指定欄位處理 |
-| `Deposit-Commission` | 帶入 Credit Card／Virtual ATM 等佣金比例；不填不適用的主產品價格與 Share Plan。合約／信件中的抽成或買入價格必須另行與此比例比對 |
+| `Deposit-Commission` | 僅用於 B2C，帶入 Credit Card／Virtual ATM 等佣金比例；不填不適用的主產品價格與 Share Plan。合約／信件中的抽成或買入價格必須另行與此比例比對。B2B 交易服務費仍留在 `Deposit` 指定欄位，不建立此產品列 |
 | `Voice`、`Survey`、`eCoupon` | 帶入付款週期；金額依付款週期換算後填入合約價格 |
 
 ### 4.3 找不到 Renewal DB 資料
@@ -108,13 +108,17 @@
 
 PDF 或照片中的雙方用印需要人工目視確認；OCR 或檔案存在本身不可當作用印已確認。
 
+Queue 的合約欄可連到 Drive 單一檔案或資料夾。資料夾必須展開並閱讀所有與本次續約相關的內容；覆核紀錄以 Queue 連結的檔案 ID／資料夾 ID 綁定目前證據，並保存實際覆核檔案的版本資訊。程式必須能解析 `/file/d/<id>`、`/d/<id>`、`/folders/<id>` 與 `?id=<id>`；連結 ID 與 `Reviewed Evidence File ID` 不一致時不得沿用先前結果。
+
 ### 6.2 原方案續約
 
-原方案續約不只限於 Queue 與原始 TPR 每個欄位字面完全一致。下列兩種「續約格式正規化」不視為換方案：
+原方案續約不只限於 Queue 與原始 TPR 每個欄位字面完全一致。下列「續約格式正規化」不視為換方案：
 
-1. 原方案的附加服務付款週期與主產品不同，但續約時依規則統一付款週期。比較時必須先把正費用附加服務換成同一年度基準；例如原始 TPR 的 Deposit 月費 1,500 元，Queue 轉為 annual 18,000 元（1,500 × 12），仍屬原方案續約，不得視為價格或方案變更。
+1. 原方案的附加服務付款週期與年繳主產品不同，但續約時依規則統一為年繳。比較時必須把原正費用附加服務的月費換成年度基準；例如原始 TPR 的 Deposit 月費 1,500 元，Queue 轉為 annual 18,000 元（1,500 × 12），仍屬原方案續約。此例外只允許 `monthly → annual`；`annual → monthly` 仍是方案變更。
 2. 原方案是短約，續約時改回完整一年，因而把年費與主產品組數由 prorate 金額還原為完整年費／完整年組數。
 3. RSV／RwG 主產品的「合約贈送組數」空白與數值 `0` 都代表沒有贈送組數，兩者比較時視為相同。此規則只適用於主產品，不可套用到 Deposit-Commission 等具有比例意義的欄位。
+
+RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。
 
 符合本節的例外後，才可接受以下任一佐證：
 
@@ -128,17 +132,17 @@ PDF 或照片中的雙方用印需要人工目視確認；OCR 或檔案存在本
 
 ### 6.3 付款週期與年繳總額判斷
 
-續約 Queue 的預設輸出為：主產品與所有附加服務使用相同付款週期。但原方案可能是 RSV 年繳、附加服務月繳，不能只因 Queue 正規化付款週期就視為換方案。
+續約 Queue 的預設輸出為：RSV 為 annual 時，正費用 add-on 也正規化為 annual，金額為月費 × 12。這個單向正規化不視為換方案。
 
-應從合約／信件中擷取「年繳：乙方需依甲方之指示付款新台幣 OOO 元」的年繳總額，並與 Queue 比對：
+覆核者必須從合約／完整信件串逐字擷取文件明載的年繳總額，並記錄原文與位置。`Annual Payment Amount (NTD)` 不得由 Queue 加總回推。程式只比較：
 
-| 信件／合約年繳總額 | 判斷 |
-| --- | --- |
-| 等於主產品年費 + 全部附加服務年費 | 主產品與附加服務均為年繳 |
-| 等於主產品年費 | RSV 年繳、附加服務月繳 |
-| 兩者皆不相符 | 不可視為原方案續約，需人工確認差異 |
+`Document annual payment amount = SUM(Queue 固定費用 rows 中 billing period = annual 的合約價格)`
 
-金額為 0 的附加服務不影響總額，無法只靠總額區分年繳或月繳；此時以合約文字為準。合約／信件未能擷取年繳總額時，應顯示待人工覆核，不可直接判定為換方案。
+比較前只移除幣別、千分位與空白，不得容許 ±1 元或其他誤差。Monthly add-on 不納入年繳總額；其月費由完整方案覆核逐項與文件比較。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額加總。
+
+RSV annual 但正費用 add-on 續約後仍為 monthly 時，是 split-billing 例外：Queue 必須保留該 add-on 為 monthly，年繳總額只包含 annual rows，並必須有 inline 與客戶雙方用印合約；Email 同意不足。若 Queue 反而把該 add-on 寫為 annual，文件與 Queue 總額不一致，整個 Branch `Check=FALSE`。
+
+金額為 0 的附加服務不影響總額。有正費用 add-on 時，年繳總額、證據原文或位置任一缺失即待人工覆核；文件金額與 Queue annual 合計不完全相等時為合約不一致。程式只寫 `Check` 與具體 Note，不自動修正 Queue 金額或付款週期。
 
 若 Queue 沒有任何正費用附加服務（只有主產品，或附加服務價格皆為 0），年繳總額不再是判斷附加服務付款週期的必要欄位，不得因未填入該欄而阻擋案件。若合約明載「加值服務：無」，應直接視為無附加服務歧義。
 
@@ -150,21 +154,17 @@ Share Plan 的整份合約總額必須用合約附件所列的完整成員合計
 
 ### 6.4 短約 prorate 與完整一年續約
 
-年繳方案若原合約不是完整一年，年費、主產品組數與有固定年費的附加服務可依 30 天制 prorate。贈送組數**不得** prorate。
+年繳方案若原合約不是完整一年，年費、主產品組數與有固定年費的附加服務依實際日曆月份天數 prorate。贈送組數**不得** prorate。
 
-設完整年費／完整年組數為 `A`、起始月天數為 `D1`、中間完整月份為 `M`、結束月天數為 `D2`：
+設完整年費／完整年組數為 `A`、起始月實際天數為 `L1`、起始月涵蓋天數為 `D1`、中間完整月份為 `M`、結束月實際天數為 `L2`、結束月涵蓋天數為 `D2`：
 
-`短約金額或組數 = (A / 12) × (D1 / 30 + M + D2 / 30)`
+`短約金額或組數 = (A / 12) × (D1 / L1 + M + D2 / L2)`
 
-其中：
-
-- `D1 = 30 - 起始日 + 1`
-- `D2 = 結束日`
-- 每個月固定以 30 天計算；日期為 31 日時以 30 日處理。
+日期首尾日都計入；若起訖日在同一月份，直接使用 `A / 12 × 涵蓋天數 / 該月實際天數`，不得重複計算首月與末月。價格與付費組數只在最終結果四捨五入，日期不得套用固定 30 天或把 31 日改為 30 日。
 
 例：完整年費 21,600 元，月費 1,800 元；合約期間為 `2026-04-23` 至 `2026-09-15`：
 
-`1,800 / 30 × 8 + 1,800 × 4 + 1,800 / 30 × 15 = 8,580`
+`1,800 × 8 / 30 + 1,800 × 4 + 1,800 × 15 / 30 = 8,580`（本例的 4 月與 9 月都恰為 30 天；其他月份必須使用各自的實際天數）
 
 若原方案的短約金額／主產品組數符合上述公式，而 Renewal DB 的續約期間為完整一年、金額／組數回到完整年度數值，應判定為**原方案續約**，不要求雙方用印作為換方案佐證。
 
@@ -191,7 +191,13 @@ Share Plan 的整份合約總額必須用合約附件所列的完整成員合計
 
 - `Original Plan Family`：`Public`、`BD New` 或 `Special`
 - `New Plan Family`：`Public`、`BD New` 或 `Special`
-- `Complete Plan Match`：完整方案是否匹配
+- `Complete Plan Match`：完整方案是否匹配；明確填入 FALSE／Fail 時是人工 veto，空白或 TRUE 仍繼續自動 Catalog 判斷，TRUE 不得覆蓋自動 conflict
+
+新方案參照的 `公版方案`、`Lite 方案`、`Email Only 方案` 均歸入 `Public` 合規家族；`BD 新方案` 歸入 `BD New`。每一來源列代表一個不可拆分的完整方案組合，產品、付款週期、使用組數、贈送組數、價格與超額單價不得跨列拼湊。
+
+方案世代只讀測試工作簿 `Legacy Branch Master` 的 Branch ID membership，正常流程不得掃描 `Raw : TPR`。`first contract date` 若存在只供追溯，不參與 runtime 分類；日期空白／無效不阻擋，但 Duplicate Branch ID 必須阻擋受影響 Branch 並在 Note 列出 rows。舊方案只匹配 Public 時不論 membership 均屬 Public；只匹配 BD New 時須同時不在 Legacy 才屬 BD New，若已列入 Legacy則為 conflict；同時匹配 Public／BD New 時，列在 Legacy 選 Public，不在 Legacy 選 BD New。新方案重複匹配時維持舊方案家族，Public ↔ BD New 不得自動轉換。Special 完全不變可依既有方案延續；Special 改為標準方案時，列在 Legacy 的目標為 Public，不在 Legacy 的目標為 BD New。合約日期另行檢核，不列入方案身分比較。
+
+`Legacy Branch Master` 是 Legacy cohort membership 的唯一主檔；`Canonical Plan Catalog` 以永久 Plan Code 及版本保存方案。Build／Audit 每次唯讀最新 `TMS 方案` 做 Catalog diff；supported row 缺 Plan Code 時 fail closed。新方案只由另行授權的 `maintainPlanCodes()` 對空白 cell 配發永久代碼，完成後重新同步才建立 Catalog v1 Active。既有方案異動沿用代碼並留下版本。同步時一併把 RSV／RwG 的 `Plan Reference Mapping` 改為官方 `TMS 方案` 的逐列完整方案版型，並保留 Deposit Mapping。官方方案修改／刪除若尚未在 `Plan Catalog Change Review` 核准，受影響 Branch 不得通過；核准刪除後保留歷史並標為 Inactive。
 
 判斷規則：
 
@@ -201,7 +207,8 @@ Share Plan 的整份合約總額必須用合約附件所列的完整成員合計
 | BD New → BD New | 可通過，不需特殊申請 |
 | Special → Special，且完全不變 | 既有特殊方案延續，不需重新申請 |
 | Public ↔ BD New | 必須特殊申請核准 |
-| Special 異動、Special 與其他家族互換、家族未知 | 必須特殊申請或人工釐清 |
+| Special → Legacy membership 對應的完整 Public／BD New | 有雙方用印時不需額外特殊申請 |
+| Special 異動、Special 改為非 membership 對應家族、家族未知 | 必須特殊申請或人工釐清 |
 
 ### 7.2 特殊申請
 
@@ -251,14 +258,32 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 
 | 表單 | 人工輸入內容 |
 | --- | --- |
-| `Contract Evidence Review` | 證據類型、名稱／方案一致性、合約實際起訖日、客戶同意、指定文字、雙方用印、年繳總額、付款週期、Deposit 抽成／買入價格、覆核者、日期與狀態 |
-| `Plan Classification Review` | 舊／新方案家族、完整方案匹配、覆核者與日期 |
+| `Contract Evidence Review` | 證據類型、名稱／期間、合約實際起訖日、客戶同意、指定文字、雙方用印、年繳總額及其逐字原文／位置、付款週期、Deposit 抽成／買入價格、Structured Review Version、provider-neutral Structured Contract Data、structured-only Manual Plan Veto，以及 Apps Script 計算的 Document Match Result／Detail、覆核者、日期與狀態 |
+| `Plan Classification Review` | Legacy membership、選填首約日、預期家族、舊／新方案家族、舊／新 Plan Code、匹配規則、例外、覆核者與日期；明確 FALSE／Fail 為人工 veto |
 | `Special Approval Review` | 特殊申請核准結果、佐證、覆核者與日期 |
 | `Share Group Review` | 成員、統編、期間、超額條件、最終狀態 |
 
 僅有 Queue 的合約連結不代表已完成檢查。若覆核表只有連結、沒有覆核結果，應顯示為待覆核。
 
-自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會直接與 Queue／Renewal DB 日期比對，不再只依賴人工填寫的 `Contract Period Match`。
+新版 structured review 使用 `Structured Review Version=1`。`Control!Active Contract Review Batch ID` 有值時，只讀取 `Review Batch ID` 相同的 current-batch rows；每個 Queue Branch 必須恰好一列，缺列或重複列均 fail closed，其他／blank batch rows 一律是 historical。Current-batch row 本身即代表 structured intent；Version 或 `Structured Contract Data` 任一缺失、JSON 無效、schema 不支援或 extraction 無法完成，必須 `NEEDS_REVIEW`，不得靜默沿用 historical `Full Plan Match=TRUE`。只有 Active Batch ID 空白的 legacy mode 才保留原本 selection／fallback。
+
+Active Batch mode 的 structured intent 只由 current-batch row 決定；其他 batch／blank-batch historical rows不得遮蔽、補足或與 current row 形成 duplicate。Active Batch ID 空白的 legacy mode 才在原本 eligible rows 中套用既有 structured-intent 規則：任一列只要 Version 或 JSON 任一有值即不得回讀較早的 legacy `Full Plan Match`。
+
+`Structured Contract Data` 只記錄 reader 從文件擷取的事實，schema 不綁定 Gemini。Gemini、其他 PDF reader 或 image/scanned-file reader 均輸出相同 schema；`Document Match Result` 與 `Document Match Detail` 只能由 Apps Script 計算並寫入，reader／skill 不得直接填入 MATCH／MISMATCH 作為 authority。
+
+Structured mode 不使用 `Full Plan Match`。人工否決只讀 `Manual Plan Veto`，且僅接受明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致`；blank、boolean `false` 或其他文字都不否決。Legacy mode 則完全保留既有 `Full Plan Match` 判斷。
+
+`Contract Evidence Review` 的 schema migration 全部依 header name 執行：既有欄 reuse，缺少的新版欄 append 到最右側，舊版額外欄保留且不重新排序。新增 review row 依 Sheet 實際 headers／column count 建立，只填 Branch ID、Evidence URL 與 `Structured Review Version=1`。必要 header duplicate 或 mapping 不明確時，在任何 write 前 fail closed；Document Match Result／Detail 也只能依 header name 定位寫入。
+
+Document Match writer 只能依 index 傳遞的 `targetRowNumber`、Review Batch ID、Version 與 JSON snapshot 寫入。Active Batch mode 下，真正寫入前必須以最新 Sheet snapshot 重新確認 target Branch／Batch identity、current-batch row 唯一性，以及 Version／JSON 與 indexing snapshot 完全一致；任一改變均 zero writes 並 fail closed。其他 batch／blank-batch historical rows不參與 current uniqueness，亦不得被更新。Active Batch ID 空白時才沿用原本 legacy writer preflight。
+
+`Plan Classification Review` 的人工輸入與 trace writer 也必須使用同一個 Active Batch identity。Active Batch ID 有值時，每個 Queue Branch 只讀取 `Review Batch ID` 相同且唯一的 current row；缺列或 duplicate 均 fail closed，不得 fallback 或寫入同 Branch 的 historical row。Trace writer 必須使用 indexing 傳遞的 `targetRowNumber`，並在任何寫入前以最新 Sheet snapshot 原子檢查 Branch ID、Review Batch ID、current-batch 唯一性與 row number；任一不符即全批 zero writes。Active Batch ID 空白時才維持 legacy first-matching-row 行為。
+
+Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
+
+每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；其 `billing_period` 固定為 `NotApplicable` 且不參與 Document Comparison，不得由 Queue、主產品或年繳總額猜成 monthly／annual。其 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數仍須精確一致。B2B 的交易服務費文字依既有 B2B／Deposit 欄位語意處理，不建立 `Deposit-Commission`。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
+
+自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會將文件、Queue 與 Renewal DB 日期正規化為 `yyyy-MM-dd` 後只比較年月日，不再只依賴人工填寫的 `Contract Period Match`，也不以時、分、秒差異判定不一致。
 
 若 Queue 有 `Deposit-Commission` 產品列，`Contract Evidence Review` 必須另外填寫文件中實際出現的：
 
@@ -267,10 +292,14 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 
 至少必須填寫其中一欄。程式會以 Queue／Renewal DB 的佣金比例為準，檢查：
 
+- `Deposit-Commission.billing_period` 不參與比較；交易費率本身沒有 recurring billing cadence。
+
 - 文件抽成比例 = Queue 的 `Deposit-Commission` 比例。
 - 文件買入價格 = `100% - Deposit-Commission 比例`。
 
 例如 Queue 為 `Credit Card 5%`，文件抽成應為 `5%`，或買入價格應為 `95%`。若文件寫 `100%`、欄位空白、數值不同或未取得所引用的商業協議增補，均不得通過；`Check = FALSE`，並在 `Note` 列出文件值、Queue／Renewal DB 值與正確應有值。此檢查為獨立必要條件，不得由 `Full Plan Match = TRUE` 取代。
+
+同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
 
 為避免新增欄位後讓已完成的歷史覆核全部失效，強制填寫日由 `Control!Deposit Commission Detail Required From` 控制；預設為 `2026-07-25`。早於該日且兩個新欄位皆空白的既有覆核沿用舊結果，但只要已填入任一比例，仍會立即進行一致性檢查。
 
@@ -300,20 +329,25 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 2. 確認每間店的 `Demand` 格式正確，且 Renewal DB 已有相應月份資料。
 3. 在測試工作表執行 `Renewal Queue → Build Queue`。
 4. Queue 會從原始 TPR 複製產品列，再依 Renewal DB 新方案覆寫。
-5. 檢查／填寫四張覆核表。
-6. 執行 `Renewal Queue → Run Contract Audit`。
-7. 在 Queue 依 `Check`、`Note`、`Update Status` 篩選後續處理。
+5. 盤點每個 Branch 的完整 relevant evidence set；新版案件以 schema version 1 填寫 provider-neutral Structured Contract Data，不填 Document Match 結果。
+6. 檢查／填寫四張覆核表。
+7. 執行 `Renewal Queue → Run Contract Audit`，由 Apps Script 計算 Document Match。
+8. 確認 Audit Log 新增 `Operation=Contract Audit` 的紀錄。
+9. 在 Queue 依 `Check`、`Note`、`Update Status` 篩選後續處理。
 
 ### 10.2 可給 AI 的指令
 
 ```text
-請從頭跑一次續約流程：
+請使用 $tpr-renewal-contract-audit，從頭跑一次目前勾選案件的完整續約流程：
 1. 依原始 TPR 中 Check Box = TRUE 與 Demand 選取案件；
 2. 從 Renewal DB 依月份建立／更新 TPR Update Queue；
 3. 保留原始 TPR 資訊與 H:AO 欄位；
-4. 依本規格檢查合約、方案家族、特殊申請與 Share Plan；
-5. 回填 Queue 的 Check、Note、Update Status 與相關檢核欄位；
-6. 不得寫入原始 TPR、Renewal DB 或方案參照來源。
+4. 逐一閱讀每個 Branch 目前連結的完整合約、Email 及資料夾內容；
+5. 盤點每個 Branch 的完整 relevant evidence set，依 provider-neutral schema 記錄文件逐產品事實；不要自行填入 MATCH／MISMATCH；
+6. 依權威規格檢查店名、期間、年繳總額、方案家族、特殊申請與 Share Plan；
+7. 填寫覆核表後執行 runContractAudit，由 Apps Script 比較 Structured Contract Data 與 Queue，並將同 Branch 的相同決策回填至所有產品列；
+8. 回報 Branch 數、product row 數、Ready／非 Ready 數及每個 FALSE 的具體 Note；
+9. 只寫測試工作簿，不得寫入正式 TPR、Renewal DB 或方案數值；僅可依另行授權維護官方方案表的 Plan Code 欄。
 ```
 
 如來源連結或分頁改變，補充：

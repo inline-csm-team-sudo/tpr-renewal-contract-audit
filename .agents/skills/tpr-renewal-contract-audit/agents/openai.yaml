@@ -1,7 +1,7 @@
 interface:
   display_name: "TPR 續約合約覆核"
-  short_description: "依 Renewal DB 建立 Queue 並逐份覆核續約合約"
-  default_prompt: "Use $tpr-renewal-contract-audit 從頭建立續約 Queue、逐份覆核合約並回填 Check 與 Note。"
+  short_description: "建立 Queue、結構化擷取合約並由程式逐項比對"
+  default_prompt: "Use $tpr-renewal-contract-audit 從頭建立續約 Queue，盤點每個 Branch 的完整 relevant evidence set，依 provider-neutral schema 記錄文件產品事實，再由 Apps Script 計算 Document Match 並回填 Check 與 Note。"
 
 policy:
   allow_implicit_invocation: true

@@ -13,6 +13,12 @@ Before reading data, changing scripts, building Queue, or reviewing a contract, 
 [`references/contract-audit-rules.md`](references/contract-audit-rules.md) completely.
 Treat that file as authoritative when older project specifications or historical Queue notes conflict.
 
+Before producing or evaluating any new `Structured Contract Data`, including an
+extraction-only shadow test, read
+[`references/structured-extraction.md`](references/structured-extraction.md) completely and use
+its first-pass and field-local fallback contracts. Finish first-pass extraction from the documents
+without exposing Queue plan values to the reader; compare with Queue only after the extraction is frozen.
+
 ## Source of truth and scope
 
 - Read the current source IDs, tab names, writable destinations, and rule settings from the reference and the workbook `Control` sheet.
@@ -30,14 +36,15 @@ When the user says「從頭跑一次續約流程」or equivalent:
 3. Run or reproduce Build Queue using only those months.
 4. Confirm the Queue preserves TPR identity and context fields and replaces only renewal-plan fields.
 5. Build one Branch-level review set from all Queue product rows for that Branch ID.
-6. Open every contract, email, image, or folder linked by the selected branches.
+6. Open every contract, email, image, or folder linked by the selected branches and inventory the complete relevant evidence set for each Branch.
 7. For PDFs or photographs, inspect every relevant page visually; OCR or extracted text is only an aid.
-8. Complete Contract Evidence, Plan Classification, Special Approval, and Share Group reviews.
-9. Decide each Branch using all products together, then write the same decision to every Queue product row for that Branch.
-10. Write `Check=TRUE` only when every required check passes. Otherwise write `FALSE` and a concrete, one-line Note containing actual values and the required next action.
-11. Verify counts, ensure every unchecked row has a nonblank Note, append Audit Log, and visually inspect the Queue.
+8. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.
+9. Complete Contract Evidence, Plan Classification, Special Approval, and Share Group reviews.
+10. Decide each Branch using all products together, then write the same decision to every Queue product row for that Branch.
+11. Write `Check=TRUE` only when every required check passes. Otherwise write `FALSE` and a concrete, one-line Note containing actual values and the required next action.
+12. Verify counts, ensure every unchecked row has a nonblank Note, append Audit Log, and visually inspect the Queue.
 
-Running the Apps Script audit alone is not a completed review. Codex must read the linked evidence and fill the review fields before final Check decisions.
+Running the Apps Script audit alone is not a completed review. Codex must read the linked evidence, confirm the Branch's complete relevant evidence set, and fill the review facts before final Check decisions. Once structured mode is enabled, missing or invalid structured data is `NEEDS_REVIEW` and must never fall back to a legacy manual TRUE.
 
 ## Tools and evidence handling
 
@@ -45,6 +52,9 @@ Running the Apps Script audit alone is not a completed review. Codex must read t
 - Use the signed-in Chrome session only when an interactive menu, Apps Script UI, or visible page state is required.
 - Use PDF rendering and page screenshots for scanned or image-only contracts.
 - Read an entire email thread and all relevant files in a linked folder, not only the first attachment.
+- Structured extraction may use Gemini or another document reader, but its output must follow the provider-neutral schema. The reader reports document facts and field states only; it does not decide MATCH/MISMATCH.
+- Extraction safety is ordered `correct Confirmed` first, `Ambiguous` or `Unreadable` second, and guessed `Confirmed` last. A completed extraction has zero wrong-Confirmed fields; first-pass usability never justifies guessing.
+- Normal passing products do not require page, location, or raw text. Preserve a source locator for mismatches, unreadable or ambiguous fields, bonus values, annual totals, Deposit rates, consent, seals, special evidence, or other manual-review exceptions when available.
 - Never mark seals, consent, restaurant name, period, or plan as confirmed merely because a file exists.
 
 ## Decision discipline

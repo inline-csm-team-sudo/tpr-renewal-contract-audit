@@ -46,6 +46,7 @@
 | `Canonical Plan Catalog`、`Plan Catalog Change Review` | 永久 Plan Code、版本、停用與方案異動審核 | Catalog 由同步維護；異動狀態由覆核者確認 |
 | `Product Expansion Rules` | Renewal DB 單列展開產品列的規則 | 業務維護 |
 | `TPR Update Queue` | 預計寫回資料、檢查結果與稽核資訊 | 流程寫入；修正須留下紀錄 |
+| `Contract Evidence Review` | Branch-level evidence facts、Structured Contract Data 及程式計算的 Document Match | Reader 只寫 provider-neutral extraction facts；Result／Detail 只由 Apps Script 寫入 |
 | `Audit Log` | 匯入、人工決策、狀態及寫回事項 | 僅新增 |
 | `Manual Exception Decisions` | 不續、漏填及例外的人工核准 | 經審核流程 |
 
@@ -123,6 +124,22 @@ Queue 的 A:W 必須完整沿用正式 TPR 的欄位順序、格式與必要識�
 掃描或拍照 PDF 需逐頁目視餐廳名稱，以及必要時 inline／客戶雙方印章；OCR 僅能輔助。應閱讀完整信件串，並以最新、明確內容覆核。
 
 文件連結可以是 Drive 單一檔案或資料夾；資料夾必須展開並閱讀全部相關檔案。覆核 ID 綁定 Queue 連結本身的檔案 ID／資料夾 ID，且 `/file/d/<id>`、`/d/<id>`、`/folders/<id>` 與 `?id=<id>` 均須正確解析。Queue 連結與覆核 ID 不一致時必須 fail closed，不能沿用舊結論。
+
+新版文件覆核以 `Structured Review Version=1` 與 provider-neutral `Structured Contract Data` 作為 extraction interface；新建立的 Contract Evidence Review row 由程式自動標記 version 1。只要 Version 或 JSON 任一存在，就不得 fallback 到 legacy `Full Plan Match=TRUE`；JSON 缺失、無效、schema 不支援或 extraction 無法完成時必須 `NEEDS_REVIEW`。只有兩欄皆空白的歷史覆核可沿用舊 fallback。
+
+同 Branch 的歷史覆核列不得遮蔽 structured intent。任一列只要 Version 或 JSON 任一存在，index 必須選用 structured-intent row；沒有完整 active structured row 時仍須 `NEEDS_REVIEW`。Document Match writer 真正寫入前必須以最新 Sheet snapshot 重新確認 target Branch 恰好只有 target row 是 Version `1` 且 JSON 非空的完整 active structured row；若 indexing 後新增第二筆 active row，必須 zero writes 並 fail closed。
+
+Schema 的 `evidence_set.state=Confirmed`、`complete=true` 必須代表已完成該 Branch relevant evidence set 盤點，並在 `relevant_source_ids` 列出全部 relevant files。Folder 不要求每一檔案建立 product rows，但只讀單一 PDF 不等於 evidence set complete；無法判定完整時使用 `Ambiguous`，Branch 不得 Ready。每個 product 的 `source_id` 必須屬於 relevant source IDs。
+
+Gemini 是目前優先 extraction reader，但 Apps Script 不依賴 Gemini-specific output。任何 reader 只輸出固定 schema 的文件事實與 `Confirmed`／`NotMentioned`／`Unreadable`／`Ambiguous`／`NotApplicable` states；Apps Script 才能計算並寫入 `Document Match Result` 與 `Document Match Detail`。Reader 提供的 MATCH／MISMATCH 欄位即使存在也沒有 authority。
+
+Structured mode 完全忽略 `Full Plan Match`；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可否決 calculated MATCH。blank、boolean `false` 或其他 token 都不是 structured veto。只有 legacy mode 維持原本 `Full Plan Match` 行為。
+
+RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
+
+`Contract Evidence Review` migration 與所有 structured read／write 均依 header name 定位。已存在欄位 reuse，缺少欄位 append 到最右側，舊欄與舊 implementation 額外欄完整保留。新增 row 依 Sheet 實際欄寬建立，只填 Branch ID、Evidence URL、`Structured Review Version=1`。必要 header duplicate 或 mapping 無法唯一判定時，必須在任何 Sheet write 前停止。
+
+正常通過的 product 不強制保存 page、location 或 raw text；只有 mismatch、ambiguous、unreadable、bonus、annual total、Deposit commission／buy-in、consent、dual seal、special evidence 或人工覆核例外需在可取得時保留 locator。完整產品 multiset 必須逐項與 Queue 比較，包含 duplicate、missing／extra product、週期、組數、贈送、價格、Share、超額及 Deposit 條件。
 
 當 RSV／RwG 主產品為 annual 且存在正費用 add-on 時，`Contract Evidence Review` 必須保存文件明載的年繳總額、逐字原文與文件／Email 位置；不得由 Queue 加總回推。文件年繳總額必須與該 Branch 的 Queue 全部 annual 固定方案價格加總完全相等；monthly add-on 另由完整方案覆核比對月費，不納入年繳總額。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額。比較不允許金額誤差。
 

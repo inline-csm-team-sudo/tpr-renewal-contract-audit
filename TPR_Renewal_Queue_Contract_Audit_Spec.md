@@ -118,6 +118,8 @@ Queue 的合約欄可連到 Drive 單一檔案或資料夾。資料夾必須展�
 2. 原方案是短約，續約時改回完整一年，因而把年費與主產品組數由 prorate 金額還原為完整年費／完整年組數。
 3. RSV／RwG 主產品的「合約贈送組數」空白與數值 `0` 都代表沒有贈送組數，兩者比較時視為相同。此規則只適用於主產品，不可套用到 Deposit-Commission 等具有比例意義的欄位。
 
+RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。
+
 符合本節的例外後，才可接受以下任一佐證：
 
 1. 完整信件中客戶有清楚表達同意續約。
@@ -256,12 +258,28 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 
 | 表單 | 人工輸入內容 |
 | --- | --- |
-| `Contract Evidence Review` | 證據類型、名稱／方案一致性、合約實際起訖日、客戶同意、指定文字、雙方用印、年繳總額及其逐字原文／位置、付款週期、Deposit 抽成／買入價格、覆核者、日期與狀態 |
+| `Contract Evidence Review` | 證據類型、名稱／期間、合約實際起訖日、客戶同意、指定文字、雙方用印、年繳總額及其逐字原文／位置、付款週期、Deposit 抽成／買入價格、Structured Review Version、provider-neutral Structured Contract Data、structured-only Manual Plan Veto，以及 Apps Script 計算的 Document Match Result／Detail、覆核者、日期與狀態 |
 | `Plan Classification Review` | Legacy membership、選填首約日、預期家族、舊／新方案家族、舊／新 Plan Code、匹配規則、例外、覆核者與日期；明確 FALSE／Fail 為人工 veto |
 | `Special Approval Review` | 特殊申請核准結果、佐證、覆核者與日期 |
 | `Share Group Review` | 成員、統編、期間、超額條件、最終狀態 |
 
 僅有 Queue 的合約連結不代表已完成檢查。若覆核表只有連結、沒有覆核結果，應顯示為待覆核。
+
+新版 structured review 使用 `Structured Review Version=1`，新建立的 Contract Evidence Review row 由程式自動填入此版本。只要 Version 或 `Structured Contract Data` 任一有值，即進入 structured mode；JSON 缺失、無效、schema 不支援或 extraction 無法完成，必須 `NEEDS_REVIEW`，不得靜默沿用 `Full Plan Match=TRUE`。只有兩欄都空白的既有 legacy review 才保留舊 fallback。
+
+同 Branch 的歷史覆核列不得遮蔽 structured intent。任一列只要 Version 或 JSON 任一有值，index 必須選用 structured-intent row；沒有完整 active structured row 時仍須 `NEEDS_REVIEW`，不可回讀較早的 legacy `Full Plan Match`。
+
+`Structured Contract Data` 只記錄 reader 從文件擷取的事實，schema 不綁定 Gemini。Gemini、其他 PDF reader 或 image/scanned-file reader 均輸出相同 schema；`Document Match Result` 與 `Document Match Detail` 只能由 Apps Script 計算並寫入，reader／skill 不得直接填入 MATCH／MISMATCH 作為 authority。
+
+Structured mode 不使用 `Full Plan Match`。人工否決只讀 `Manual Plan Veto`，且僅接受明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致`；blank、boolean `false` 或其他文字都不否決。Legacy mode 則完全保留既有 `Full Plan Match` 判斷。
+
+`Contract Evidence Review` 的 schema migration 全部依 header name 執行：既有欄 reuse，缺少的新版欄 append 到最右側，舊版額外欄保留且不重新排序。新增 review row 依 Sheet 實際 headers／column count 建立，只填 Branch ID、Evidence URL 與 `Structured Review Version=1`。必要 header duplicate 或 mapping 不明確時，在任何 write 前 fail closed；Document Match Result／Detail 也只能依 header name 定位寫入。
+
+Document Match writer 只能依實際 `targetRowNumber` 寫入。真正寫入前必須以最新 Sheet snapshot 重新確認每個 target Branch 恰好只有該 row 是 Version `1` 且 JSON 非空的完整 active structured row；若 indexing 後新增第二筆 active row或 identity 改變，必須 zero writes 並 fail closed。
+
+Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
+
+每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。
 
 自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會將文件、Queue 與 Renewal DB 日期正規化為 `yyyy-MM-dd` 後只比較年月日，不再只依賴人工填寫的 `Contract Period Match`，也不以時、分、秒差異判定不一致。
 
@@ -276,6 +294,8 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 - 文件買入價格 = `100% - Deposit-Commission 比例`。
 
 例如 Queue 為 `Credit Card 5%`，文件抽成應為 `5%`，或買入價格應為 `95%`。若文件寫 `100%`、欄位空白、數值不同或未取得所引用的商業協議增補，均不得通過；`Check = FALSE`，並在 `Note` 列出文件值、Queue／Renewal DB 值與正確應有值。此檢查為獨立必要條件，不得由 `Full Plan Match = TRUE` 取代。
+
+同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
 
 為避免新增欄位後讓已完成的歷史覆核全部失效，強制填寫日由 `Control!Deposit Commission Detail Required From` 控制；預設為 `2026-07-25`。早於該日且兩個新欄位皆空白的既有覆核沿用舊結果，但只要已填入任一比例，仍會立即進行一致性檢查。
 
@@ -305,10 +325,11 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 2. 確認每間店的 `Demand` 格式正確，且 Renewal DB 已有相應月份資料。
 3. 在測試工作表執行 `Renewal Queue → Build Queue`。
 4. Queue 會從原始 TPR 複製產品列，再依 Renewal DB 新方案覆寫。
-5. 檢查／填寫四張覆核表。
-6. 執行 `Renewal Queue → Run Contract Audit`。
-7. 確認 Audit Log 新增 `Operation=Contract Audit` 的紀錄。
-8. 在 Queue 依 `Check`、`Note`、`Update Status` 篩選後續處理。
+5. 盤點每個 Branch 的完整 relevant evidence set；新版案件以 schema version 1 填寫 provider-neutral Structured Contract Data，不填 Document Match 結果。
+6. 檢查／填寫四張覆核表。
+7. 執行 `Renewal Queue → Run Contract Audit`，由 Apps Script 計算 Document Match。
+8. 確認 Audit Log 新增 `Operation=Contract Audit` 的紀錄。
+9. 在 Queue 依 `Check`、`Note`、`Update Status` 篩選後續處理。
 
 ### 10.2 可給 AI 的指令
 
@@ -318,10 +339,11 @@ AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用�
 2. 從 Renewal DB 依月份建立／更新 TPR Update Queue；
 3. 保留原始 TPR 資訊與 H:AO 欄位；
 4. 逐一閱讀每個 Branch 目前連結的完整合約、Email 及資料夾內容；
-5. 依權威規格檢查店名、期間、完整方案、年繳總額、方案家族、特殊申請與 Share Plan；
-6. 填寫覆核表後執行 runContractAudit，並將同 Branch 的相同決策回填至所有產品列；
-7. 回報 Branch 數、product row 數、Ready／非 Ready 數及每個 FALSE 的具體 Note；
-8. 只寫測試工作簿，不得寫入正式 TPR、Renewal DB 或方案數值；僅可依另行授權維護官方方案表的 Plan Code 欄。
+5. 盤點每個 Branch 的完整 relevant evidence set，依 provider-neutral schema 記錄文件逐產品事實；不要自行填入 MATCH／MISMATCH；
+6. 依權威規格檢查店名、期間、年繳總額、方案家族、特殊申請與 Share Plan；
+7. 填寫覆核表後執行 runContractAudit，由 Apps Script 比較 Structured Contract Data 與 Queue，並將同 Branch 的相同決策回填至所有產品列；
+8. 回報 Branch 數、product row 數、Ready／非 Ready 數及每個 FALSE 的具體 Note；
+9. 只寫測試工作簿，不得寫入正式 TPR、Renewal DB 或方案數值；僅可依另行授權維護官方方案表的 Plan Code 欄。
 ```
 
 如來源連結或分頁改變，補充：

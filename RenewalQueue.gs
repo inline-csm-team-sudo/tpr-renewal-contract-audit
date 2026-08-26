@@ -15,7 +15,7 @@ const QUEUE_AUDIT_HEADERS = [
 ];
 const EVIDENCE_REVIEW_HEADERS = [
   'Branch ID', 'Evidence URL', 'Evidence Type', 'Restaurant Name Match',
-  'Contract Period Match', 'Full Plan Match', 'Customer Explicit Consent',
+  'Contract Period Match', 'Full Plan Match', 'Manual Plan Veto', 'Customer Explicit Consent',
   'Agreement Confirmation Text', 'Confirmation Sender', 'Inline Seal',
   'Customer Seal', 'Reviewer', 'Reviewed At', 'Status', 'Notes',
   'Annual Payment Amount (NTD)', 'Billing Cycle Match',
@@ -24,7 +24,9 @@ const EVIDENCE_REVIEW_HEADERS = [
   'Document Restaurant Name', 'Document Legal Entity Name',
   'Restaurant Name Match Result', 'Restaurant Alias Evidence',
   'Reviewed Evidence File ID', 'Reviewed Evidence Modified At',
-  'Annual Payment Evidence Quote', 'Annual Payment Evidence Location'
+  'Annual Payment Evidence Quote', 'Annual Payment Evidence Location',
+  'Structured Review Version', 'Structured Contract Data',
+  'Document Match Result', 'Document Match Detail'
 ];
 const PLAN_REVIEW_HEADERS = [
   'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
@@ -447,13 +449,16 @@ function runContractAudit() {
   const byBranch = groupBy_(rows, r => auditText_(auditGet_(r.values, qx, 'Branch ID')));
   const origins = loadLegacyBranchOrigins_(ss, control, Object.keys(byBranch));
   const shareOverageSource = shareOverageSourceAudit_(ss, control, byBranch, qx);
-  const evidence = indexedReview_(ss.getSheetByName('Contract Evidence Review'), 'Branch ID');
+  const evidence = indexedEvidenceReviews_(
+    ss.getSheetByName('Contract Evidence Review'), 'Branch ID', Object.keys(byBranch)
+  );
   const plans = indexedReview_(ss.getSheetByName('Plan Classification Review'), 'Branch ID');
   const approvals = indexedReview_(ss.getSheetByName('Special Approval Review'), 'Branch ID');
   const shares = indexedReview_(ss.getSheetByName('Share Group Review'), 'Share Plan ID');
   const bonusReference = loadRsvBonusReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const familyReference = loadRsvFamilyReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const resultRows = [];
+  const documentMatchTraces = [];
   const affectedCatalogChanges = {};
   let readyBranches = 0;
 
@@ -464,13 +469,22 @@ function runContractAudit() {
     const comparison = classifyAction_(oldRows, queueRows, tx, qx, shareOverage);
     const action = comparison.action;
     const planChange = comparison.planChange;
-    const ev = evidence[branchId] || {};
+    const evidenceEntry = evidence[branchId] || null;
+    const ev = evidenceEntry ? evidenceEntry.review : {};
     const plan = plans[branchId] || {};
     const approval = approvals[branchId] || {};
     const share = shareAudit_(queueRows, qx, shares, shareOverage);
     const renewalDataMissing = queueRows.some(r => auditText_(auditGet_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
     const billing = billingCycleAudit_(ev, queueRows, qx);
-    const contract = contractAudit_(ev, planChange, billing, queueRows, qx, control, comparison.reason);
+    const documentMatch = structuredDocumentMatchAudit_(ev, queueRows, qx);
+    const contractReview = structuredReviewForProtectedGates_(ev, documentMatch);
+    const contract = contractAudit_(contractReview, documentMatch, planChange, billing, queueRows, qx, control, comparison.reason);
+    if (evidenceEntry && evidenceEntry.targetRowNumber !== null) {
+      documentMatchTraces.push(Object.assign({}, documentMatch, {
+        branchId,
+        targetRowNumber:evidenceEntry.targetRowNumber
+      }));
+    }
     const bonus = bonusCountAudit_(queueRows, qx, bonusReference, control);
     const origin = origins[branchId] || {};
     const oldPlan = inferRsvPlan_(oldRows, tx, familyReference, shareOverage, origin, { mode:'original' });
@@ -525,6 +539,7 @@ function runContractAudit() {
   });
 
   recordPlanChangeAffectedBranches_(ss.getSheetByName('Plan Catalog Change Review'), affectedCatalogChanges);
+  writeDocumentMatchTraces_(ss.getSheetByName('Contract Evidence Review'), documentMatchTraces);
 
   queue.getRange(2, 1, resultRows.length, queueHeaders.length).setValues(resultRows);
   queue.getRange(2, requiredHeader_(qx, 'Check', 'Queue') + 1, resultRows.length, 1)
@@ -535,7 +550,7 @@ function runContractAudit() {
 }
 
 function setupAuditSheets_(ss, queue) {
-  ensureReviewSheet_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS);
+  const evidenceSheet = ensureReviewSheetHeadersByName_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Plan Classification Review', PLAN_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Special Approval Review', SPECIAL_REVIEW_HEADERS);
   ensureReviewSheet_(ss, 'Share Group Review', SHARE_REVIEW_HEADERS);
@@ -548,7 +563,7 @@ function setupAuditSheets_(ss, queue) {
     if (!id) return;
     if (!branches[id]) branches[id] = auditText_(auditGet_(r, ix, '合約'));
   });
-  appendMissingReviewRows_(ss.getSheetByName('Contract Evidence Review'), Object.keys(branches), id => [id, branches[id]]);
+  appendMissingEvidenceReviewRows_(evidenceSheet, branches);
   appendMissingReviewRows_(ss.getSheetByName('Plan Classification Review'), Object.keys(branches), id => [id]);
   appendMissingReviewRows_(ss.getSheetByName('Special Approval Review'), Object.keys(branches), id => [id]);
   const shareIds = [...new Set(values.slice(1).map(r => auditText_(auditGet_(r, ix, 'Share Plan ID'))).filter(Boolean))];
@@ -955,6 +970,93 @@ function ensureReviewSheet_(ss, name, headers) {
   return sheet;
 }
 
+/**
+ * Contract Evidence Review may contain columns from an older structured
+ * implementation.  Preserve every existing column and append only missing
+ * required headers after a duplicate/ambiguity preflight has passed.
+ */
+function ensureReviewSheetHeadersByName_(ss, name, requiredHeaders) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  const lastColumn = sheet.getLastColumn();
+  const headers = lastColumn ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0] : [];
+  const plan = headerNameMigrationPlan_(headers, requiredHeaders, name);
+  if (plan.missing.length) {
+    const requiredLastColumn = lastColumn + plan.missing.length;
+    if (requiredLastColumn > sheet.getMaxColumns()) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredLastColumn - sheet.getMaxColumns());
+    }
+    sheet.getRange(1, lastColumn + 1, 1, plan.missing.length).setValues([plan.missing]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function headerNameMigrationPlan_(headers, requiredHeaders, scope) {
+  const actualHeaders = headers.map(value => auditText_(value));
+  const requiredNames = requiredHeaders.map(value => auditText_(value));
+  const requiredByNormalized = {};
+  requiredNames.forEach(name => {
+    const key = norm_(name);
+    if (requiredByNormalized[key]) {
+      throw new Error(scope + ' required header definition is ambiguous: ' + name);
+    }
+    requiredByNormalized[key] = name;
+  });
+
+  const actualByNormalized = {};
+  actualHeaders.forEach((name, index) => {
+    if (!name) return;
+    const key = norm_(name);
+    (actualByNormalized[key] || (actualByNormalized[key] = [])).push({ name, index });
+  });
+
+  const positions = {};
+  const missing = [];
+  requiredNames.forEach(name => {
+    const matches = actualByNormalized[norm_(name)] || [];
+    if (matches.length > 1) {
+      throw new Error(scope + ' required header is duplicated: ' + name +
+        ' at columns ' + matches.map(match => match.index + 1).join(', '));
+    }
+    if (!matches.length) {
+      positions[name] = actualHeaders.length + missing.length;
+      missing.push(name);
+      return;
+    }
+    if (matches[0].name !== name) {
+      throw new Error(scope + ' header mapping is ambiguous: expected "' + name +
+        '", found "' + matches[0].name + '" at column ' + (matches[0].index + 1));
+    }
+    positions[name] = matches[0].index;
+  });
+  return { headers:actualHeaders.concat(missing), positions, missing };
+}
+
+function appendMissingEvidenceReviewRows_(sheet, branches) {
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) throw new Error(sheet.getName() + ' has no header row.');
+  const headers = values[0].map(String);
+  const rows = missingEvidenceReviewRows_(headers, values.slice(1), branches, sheet.getName());
+  if (!rows.length) return;
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, headers.length).setValues(rows);
+}
+
+function missingEvidenceReviewRows_(headers, existingRows, branches, scope) {
+  const plan = headerNameMigrationPlan_(headers, EVIDENCE_REVIEW_HEADERS, scope);
+  if (plan.missing.length) {
+    throw new Error(scope + ' required headers were not appended before row creation: ' + plan.missing.join(', '));
+  }
+  const existing = new Set(existingRows.map(row => auditText_(row[plan.positions['Branch ID']])).filter(Boolean));
+  return Object.keys(branches).filter(id => !existing.has(id)).map(id => {
+    const row = headers.map(() => '');
+    row[plan.positions['Branch ID']] = id;
+    row[plan.positions['Evidence URL']] = branches[id];
+    row[plan.positions['Structured Review Version']] = '1';
+    return row;
+  });
+}
+
 function appendMissingReviewRows_(sheet, ids, makeRow) {
   const existing = new Set(sheet.getDataRange().getValues().slice(1).map(r => auditText_(r[0])).filter(Boolean));
   const missing = ids.filter(id => !existing.has(id));
@@ -972,6 +1074,62 @@ function indexedReview_(sheet, keyHeader) {
     if (!id || out[id]) return;
     out[id] = values[0].reduce((o, h, i) => (o[String(h)] = row[i], o), {});
   });
+  return out;
+}
+
+function indexedEvidenceReviews_(sheet, keyHeader, relevantIds) {
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return {};
+  const headers = values[0].map(String);
+  const plan = headerNameMigrationPlan_(headers, [
+    keyHeader, 'Structured Review Version', 'Structured Contract Data'
+  ], sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' evidence index missing headers: ' + plan.missing.join(', '));
+  }
+  const keyColumn = plan.positions[keyHeader];
+  const versionColumn = plan.positions['Structured Review Version'];
+  const dataColumn = plan.positions['Structured Contract Data'];
+  const relevant = Array.isArray(relevantIds)
+    ? relevantIds.reduce((out, id) => (out[auditText_(id)] = true, out), {})
+    : null;
+  const entriesById = {};
+
+  values.slice(1).forEach((row, index) => {
+    const id = auditText_(row[keyColumn]);
+    if (!id || relevant && !relevant[id]) return;
+    if (!entriesById[id]) entriesById[id] = [];
+    entriesById[id].push({
+      rowNumber:index + 2,
+      review:headers.reduce((out, header, column) => (out[header] = row[column], out), {}),
+      structuredIntent:auditText_(row[versionColumn]) !== '' || auditText_(row[dataColumn]) !== '',
+      activeStructured:auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== ''
+    });
+  });
+
+  const duplicateErrors = [];
+  const out = {};
+  Object.keys(entriesById).forEach(id => {
+    const entries = entriesById[id];
+    const structured = entries.filter(entry => entry.activeStructured);
+    const structuredIntent = entries.filter(entry => entry.structuredIntent);
+    if (structured.length > 1) {
+      duplicateErrors.push(id + ' rows ' + structured.map(entry => entry.rowNumber).join(', '));
+      return;
+    }
+    const selected = structured.length === 1
+      ? structured[0]
+      : (structuredIntent.length ? structuredIntent[0] : entries[0]);
+    out[id] = {
+      review:selected.review,
+      rowNumber:selected.rowNumber,
+      targetRowNumber:structured.length === 1 ? selected.rowNumber : null
+    };
+  });
+  if (duplicateErrors.length) {
+    throw new Error(sheet.getName() + ' has duplicate active structured review rows: ' +
+      duplicateErrors.join('；'));
+  }
   return out;
 }
 
@@ -1227,12 +1385,528 @@ function productKey_(row, ix) {
 function sameMultiset_(a, b) { return a.length === b.length && a.slice().sort().join('\n') === b.slice().sort().join('\n'); }
 function groupBy_(items, key) { return items.reduce((o, item) => { const k = key(item); (o[k] || (o[k] = [])).push(item); return o; }, {}); }
 
-function contractAudit_(review, planChange, billing, queueRows, qx, control, planDifference) {
+/**
+ * Contract product facts are provider-neutral JSON.  A review enters the new
+ * mode when either the review version or JSON cell has a value; once that
+ * happens, missing or invalid structured data must fail closed instead of
+ * falling back to a legacy Full Plan Match=TRUE checkbox.
+ */
+function structuredDocumentMatchAudit_(review, queueRows, qx) {
+  const parsed = parseStructuredContractData_(review);
+  if (parsed.result === 'NO_STRUCTURED_DATA') {
+    return {
+      result:'NO_STRUCTURED_DATA', hasInput:false,
+      reason:'Legacy review has no structured contract data.', detail:'Legacy Full Plan Match fallback applies.'
+    };
+  }
+  if (parsed.result !== 'OK') {
+    return { result:'NEEDS_REVIEW', hasInput:true, reason:parsed.reason, detail:parsed.reason };
+  }
+
+  const normalized = normalizeStructuredDocumentProducts_(parsed.data);
+  if (normalized.errors.length) {
+    const reason = 'Structured Contract Data 尚無法可靠比較：' + normalized.errors.join('；');
+    return {
+      result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason,
+      structuredData:parsed.data
+    };
+  }
+
+  const comparison = compareStructuredDocumentProducts_(normalized.lines, queueRows, qx);
+  return {
+    result:comparison.result,
+    hasInput:true,
+    reason:comparison.reason,
+    detail:comparison.detail,
+    structuredData:parsed.data
+  };
+}
+
+function parseStructuredContractData_(review) {
+  const reviewVersion = auditText_(review['Structured Review Version']);
+  const raw = review['Structured Contract Data'];
+  const rawText = typeof raw === 'string' ? raw.trim() : auditText_(raw);
+  if (!reviewVersion && !rawText) return { result:'NO_STRUCTURED_DATA' };
+  if (reviewVersion !== '1') {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Structured review mode 已啟用，但 Structured Review Version 必須為 1（目前為「' +
+        (reviewVersion || '空白') + '」）'
+    };
+  }
+  if (!rawText) {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Structured review mode 已啟用，但 Structured Contract Data 缺失；不得沿用 Full Plan Match'
+    };
+  }
+
+  let data;
+  try {
+    data = typeof raw === 'object' && raw !== null ? raw : JSON.parse(rawText);
+  } catch (error) {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data 不是有效 JSON：' + error.message };
+  }
+  if (!data || Array.isArray(data) || typeof data !== 'object') {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data 必須是 JSON object' };
+  }
+  if (String(data.schema_version || '') !== '1') {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Structured Contract Data schema_version 必須為 1（目前為「' +
+        auditText_(data.schema_version) + '」）'
+    };
+  }
+
+  const evidenceSet = data.evidence_set;
+  if (!evidenceSet || typeof evidenceSet !== 'object' || Array.isArray(evidenceSet)) {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data 缺少 evidence_set' };
+  }
+  const evidenceState = structuredState_(evidenceSet.state);
+  if (evidenceState === 'ambiguous' || evidenceState === 'unreadable') {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'Branch relevant evidence set 為 ' + displayStructuredState_(evidenceSet.state) +
+        '，無法確認文件集合是否完整'
+    };
+  }
+  if (evidenceState !== 'confirmed' || evidenceSet.complete !== true) {
+    return {
+      result:'NEEDS_REVIEW',
+      reason:'document_set_complete 尚未確認：必須完成 Branch relevant evidence set 盤點，不是只讀取單一檔案'
+    };
+  }
+  if (!Array.isArray(evidenceSet.relevant_source_ids)) {
+    return { result:'NEEDS_REVIEW', reason:'evidence_set.relevant_source_ids 必須列出本 Branch 的 relevant files' };
+  }
+  const relevantSourceIds = [...new Set(evidenceSet.relevant_source_ids.map(auditText_).filter(Boolean))];
+  if (!relevantSourceIds.length) {
+    return { result:'NEEDS_REVIEW', reason:'evidence_set 沒有列出任何 relevant source，無法確認完整方案證據' };
+  }
+  if (!Array.isArray(data.products)) {
+    return { result:'NEEDS_REVIEW', reason:'Structured Contract Data products 必須是 array' };
+  }
+  data.evidence_set.relevant_source_ids = relevantSourceIds;
+  return { result:'OK', data };
+}
+
+function structuredState_(value) {
+  return auditText_(value).toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function displayStructuredState_(value) {
+  return auditText_(value) || '空白';
+}
+
+function normalizeStructuredDocumentProducts_(data) {
+  const relevantSourceIds = data.evidence_set.relevant_source_ids;
+  const errors = [];
+  const lines = [];
+  data.products.forEach((row, index) => {
+    const label = 'products[' + index + ']';
+    if (!row || Array.isArray(row) || typeof row !== 'object') {
+      errors.push(label + ' 必須是 object');
+      return;
+    }
+    const sourceId = auditText_(row.source_id);
+    if (!sourceId) errors.push(label + '.source_id 缺失');
+    else if (relevantSourceIds.indexOf(sourceId) < 0) {
+      errors.push(label + '.source_id「' + sourceId + '」不在 evidence_set.relevant_source_ids');
+    }
+
+    const productField = structuredField_(row, 'product', label, { confirmedRequired:true, type:'product' });
+    if (productField.error) {
+      errors.push(productField.error);
+      return;
+    }
+    const product = canonicalDocumentProduct_(productField.value);
+    if (!isSupportedDocumentProduct_(product)) {
+      errors.push(label + '.product「' + displayStructuredValue_(productField.value) + '」不是目前支援的 canonical Product');
+      return;
+    }
+
+    const values = {};
+    const common = [
+      ['billing_period', 'billing', 'billing'],
+      ['usage_sets', 'sets', 'sets'],
+      ['bonus_sets', 'bonus', 'number'],
+      ['price', 'price', 'number'],
+      ['share_plan_id', 'share', 'identifier']
+    ];
+    common.forEach(spec => {
+      const field = structuredField_(row, spec[0], label, {
+        type:spec[2], notMentionedAsZero:spec[0] === 'bonus_sets' && isMainProduct_(product)
+      });
+      if (field.error) errors.push(field.error);
+      else values[spec[1]] = field.value;
+    });
+
+    if (product === 'Deposit' || product === 'Deposit-Commission') {
+      const depositType = structuredField_(row, 'deposit_type', label, { type:'text' });
+      if (depositType.error) errors.push(depositType.error);
+      else values.overageMethod = depositType.value;
+    } else {
+      const overageMethod = structuredField_(row, 'overage_method', label, { type:'text' });
+      if (overageMethod.error) errors.push(overageMethod.error);
+      else values.overageMethod = overageMethod.value;
+    }
+
+    if (product === 'Deposit') {
+      const setupFee = structuredField_(row, 'setup_fee', label, { type:'number' });
+      if (setupFee.error) errors.push(setupFee.error);
+      else values.overagePrice = setupFee.value;
+      const commission = structuredCommissionValue_(row, label, false);
+      if (commission.error) errors.push(commission.error);
+      else if (commission.present) values.bonus = commission.value;
+    } else if (product === 'Deposit-Commission') {
+      const commission = structuredCommissionValue_(row, label, true);
+      if (commission.error) errors.push(commission.error);
+      else values.bonus = commission.value;
+      values.overagePrice = '';
+    } else {
+      const overagePrice = structuredField_(row, 'overage_unit_price', label, { type:'number' });
+      if (overagePrice.error) errors.push(overagePrice.error);
+      else values.overagePrice = overagePrice.value;
+    }
+
+    if (isMainProduct_(product) && (values.bonus === '' || values.bonus === '0')) values.bonus = '0';
+    if (product === 'Deposit' && values.overageMethod === 'b2b' && (values.bonus === '' || values.bonus === '0')) {
+      values.bonus = '0';
+    }
+    if (product === 'Deposit' && (values.overagePrice === '' || values.overagePrice === '0')) {
+      values.overagePrice = '0';
+    }
+    if (isMainProduct_(product) && values.sets === 'unlimited' &&
+        (values.overagePrice === '' || values.overagePrice === '0')) {
+      values.overagePrice = '0';
+    }
+    lines.push(Object.assign({ product, sourceId, index }, values));
+  });
+  return { lines, errors:[...new Set(errors)] };
+}
+
+function structuredField_(row, fieldName, rowLabel, options) {
+  const field = row[fieldName];
+  const label = rowLabel + '.' + fieldName;
+  if (!field || Array.isArray(field) || typeof field !== 'object') {
+    return { error:label + ' 必須包含 state 與 value' };
+  }
+  const state = structuredState_(field.state);
+  if (state === 'unreadable' || state === 'ambiguous') {
+    return { error:label + ' 為 ' + displayStructuredState_(field.state) + '，需人工確認文件' };
+  }
+  if (options && options.confirmedRequired && state !== 'confirmed') {
+    return { error:label + ' 必須為 Confirmed' };
+  }
+  if (state === 'notmentioned') {
+    return { value:options && options.notMentionedAsZero ? '0' : '', state };
+  }
+  if (state === 'notapplicable') return { value:'', state };
+  if (state !== 'confirmed') {
+    return { error:label + ' state 必須為 Confirmed、NotMentioned、Unreadable、Ambiguous 或 NotApplicable' };
+  }
+  return normalizeStructuredValue_(field.value, options && options.type, label);
+}
+
+function normalizeStructuredValue_(value, type, label) {
+  if (type === 'product') return { value:auditText_(value) };
+  if (type === 'identifier') return { value:auditText_(value) };
+  if (type === 'text') return { value:auditText_(value).toLowerCase() };
+  if (type === 'billing') {
+    const text = auditText_(value).toLowerCase();
+    const aliases = { '年繳':'annual', '月繳':'monthly' };
+    return { value:aliases[text] || text };
+  }
+  if (type === 'sets' && auditText_(value).toLowerCase() === 'unlimited') return { value:'unlimited' };
+  if (type === 'number' || type === 'sets') {
+    const number = auditNumber_(value);
+    if (number === null) return { error:label + ' state=Confirmed 但 value 不是有效數字' };
+    return { value:String(number) };
+  }
+  return { value:auditText_(value) };
+}
+
+function structuredCommissionValue_(row, rowLabel, required) {
+  const commission = structuredOptionalNumberField_(row, 'commission_rate', rowLabel);
+  const buyIn = structuredOptionalNumberField_(row, 'buy_in_price', rowLabel);
+  if (commission.error) return commission;
+  if (buyIn.error) return buyIn;
+  if (!commission.present && !buyIn.present) {
+    return required
+      ? { error:rowLabel + ' 必須以 commission_rate 或 buy_in_price 明確記錄 Deposit-Commission 費率' }
+      : { present:false };
+  }
+  const commissionNumber = commission.present ? Number(commission.value) : 100 - Number(buyIn.value);
+  if (commission.present && buyIn.present && Math.abs(commissionNumber - (100 - Number(buyIn.value))) > 0.000001) {
+    return { error:rowLabel + ' 的 commission_rate 與 buy_in_price 互相矛盾' };
+  }
+  return { present:true, value:String(commissionNumber) };
+}
+
+function structuredOptionalNumberField_(row, fieldName, rowLabel) {
+  if (row[fieldName] === undefined) return { present:false };
+  const field = structuredField_(row, fieldName, rowLabel, { type:'number' });
+  if (field.error) return field;
+  return field.value === '' ? { present:false } : { present:true, value:field.value };
+}
+
+function canonicalDocumentProduct_(value) {
+  const text = auditText_(value);
+  const known = {
+    'rsv':'RSV', 'rwg':'RwG', 'deposit':'Deposit', 'deposit-commission':'Deposit-Commission',
+    'voice':'Voice', 'survey':'Survey', 'ecoupon':'eCoupon'
+  };
+  return known[text.toLowerCase()] || text;
+}
+
+function isSupportedDocumentProduct_(product) {
+  return ['RSV', 'RwG', 'Deposit', 'Deposit-Commission', 'Voice', 'Survey', 'eCoupon'].indexOf(product) >= 0;
+}
+
+function normalizeQueueDocumentProduct_(row, qx) {
+  const product = canonicalDocumentProduct_(auditGet_(row, qx, '產品', true));
+  const overageMethod = auditText_(auditGet_(row, qx, '超額計算方式', true)).toLowerCase();
+  const setsRaw = auditGet_(row, qx, '合約組數', true);
+  let bonus = normalizeQueueComparableScalar_(auditGet_(row, qx, '合約贈送組數', true), false);
+  let overagePrice = normalizeQueueComparableScalar_(auditGet_(row, qx, '超額每組單價', true), false);
+  if (isMainProduct_(product) && (bonus === '' || bonus === '0')) bonus = '0';
+  if (product === 'Deposit' && overageMethod === 'b2b' && (bonus === '' || bonus === '0')) bonus = '0';
+  if (product === 'Deposit' && (overagePrice === '' || overagePrice === '0')) overagePrice = '0';
+  if (isMainProduct_(product) && auditText_(setsRaw).toLowerCase() === 'unlimited' &&
+      (overagePrice === '' || overagePrice === '0')) overagePrice = '0';
+  return {
+    product,
+    billing:auditText_(auditGet_(row, qx, '付款週期', true)).toLowerCase(),
+    sets:normalizeQueueComparableScalar_(setsRaw, true),
+    bonus,
+    price:normalizeQueueComparableScalar_(auditGet_(row, qx, '合約價格', true), false),
+    share:auditText_(auditGet_(row, qx, 'Share Plan ID')),
+    overageMethod,
+    overagePrice
+  };
+}
+
+function normalizeQueueComparableScalar_(value, allowUnlimited) {
+  const text = auditText_(value);
+  if (!text) return '';
+  if (allowUnlimited && text.toLowerCase() === 'unlimited') return 'unlimited';
+  const number = auditNumber_(value);
+  return number === null ? text.toLowerCase() : String(number);
+}
+
+function compareStructuredDocumentProducts_(documentLines, queueRows, qx) {
+  const queueLines = queueRows.map(r => normalizeQueueDocumentProduct_(r.values, qx));
+  const allowMonthlyAddOnAnnualization = queueLines.some(line =>
+    isMainProduct_(line.product) && line.billing === 'annual'
+  );
+  const documentByProduct = groupBy_(documentLines, line => line.product.toLowerCase());
+  const queueByProduct = groupBy_(queueLines, line => line.product.toLowerCase());
+  const productKeys = [...new Set(Object.keys(documentByProduct).concat(Object.keys(queueByProduct)))].sort();
+  const differences = [];
+
+  productKeys.forEach(key => {
+    const documents = (documentByProduct[key] || []).slice();
+    const queues = (queueByProduct[key] || []).slice();
+    const product = documents[0] && documents[0].product || queues[0] && queues[0].product || key;
+    const matching = maximumStructuredLineMatching_(documents, queues, allowMonthlyAddOnAnnualization);
+    const unmatchedDocuments = documents.filter((line, index) => matching.documentMatches[index] < 0)
+      .sort((a, b) => structuredLineSignature_(a).localeCompare(structuredLineSignature_(b)));
+    const unmatchedQueues = queues.filter((line, index) => matching.queueMatches[index] < 0)
+      .sort((a, b) => structuredLineSignature_(a).localeCompare(structuredLineSignature_(b)));
+    const pairCount = Math.min(unmatchedDocuments.length, unmatchedQueues.length);
+    for (let i = 0; i < pairCount; i++) {
+      differences.push.apply(differences, structuredDocumentLineDifferences_(
+        unmatchedDocuments[i], unmatchedQueues[i], allowMonthlyAddOnAnnualization
+      ));
+    }
+    unmatchedDocuments.slice(pairCount).forEach(line => {
+      differences.push('文件多出 ' + product + ' 產品列（source ' + line.sourceId + '）');
+    });
+    unmatchedQueues.slice(pairCount).forEach(() => {
+      differences.push('Queue 有 ' + product + ' 產品列，但完整文件集合未列出對應產品');
+    });
+  });
+
+  if (differences.length) {
+    const detail = '文件方案與 Queue 不一致：' + differences.join('；');
+    return { result:'MISMATCH', reason:detail, detail };
+  }
+  const detail = 'Structured Contract Data 與 Queue 的 ' + queueLines.length + ' 個產品列逐項一致。';
+  return { result:'MATCH', reason:'', detail };
+}
+
+function maximumStructuredLineMatching_(documents, queues, allowAnnualization) {
+  const queueMatches = queues.map(() => -1);
+  function assign(documentIndex, seenQueues) {
+    for (let queueIndex = 0; queueIndex < queues.length; queueIndex++) {
+      if (seenQueues[queueIndex] || !structuredDocumentLineEqual_(
+        documents[documentIndex], queues[queueIndex], allowAnnualization
+      )) continue;
+      seenQueues[queueIndex] = true;
+      if (queueMatches[queueIndex] < 0 || assign(queueMatches[queueIndex], seenQueues)) {
+        queueMatches[queueIndex] = documentIndex;
+        return true;
+      }
+    }
+    return false;
+  }
+  documents.forEach((line, index) => assign(index, queues.map(() => false)));
+  const documentMatches = documents.map(() => -1);
+  queueMatches.forEach((documentIndex, queueIndex) => {
+    if (documentIndex >= 0) documentMatches[documentIndex] = queueIndex;
+  });
+  return { documentMatches, queueMatches };
+}
+
+function structuredDocumentLineEqual_(documentLine, queueLine, allowAnnualization) {
+  return structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnualization).length === 0;
+}
+
+function structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnualization) {
+  const adjusted = Object.assign({}, documentLine);
+  const monthlyPrice = Number(documentLine.price);
+  if (allowAnnualization && !isMainProduct_(queueLine.product) &&
+      documentLine.billing === 'monthly' && queueLine.billing === 'annual' &&
+      documentLine.price !== '' && isFinite(monthlyPrice) && monthlyPrice > 0) {
+    adjusted.billing = 'annual';
+    adjusted.price = String(monthlyPrice * 12);
+  }
+  const fields = [
+    ['billing', '付款週期'], ['sets', '使用組數'], ['bonus', '贈送組數'], ['price', '價格'],
+    ['share', 'Share Plan ID'], ['overageMethod', '超額計算方式'], ['overagePrice', '超額單價']
+  ];
+  const product = queueLine.product || documentLine.product;
+  return fields.filter(pair => adjusted[pair[0]] !== queueLine[pair[0]]).map(pair =>
+    product + ' ' + pair[1] + '：文件 ' + displayStructuredValue_(documentLine[pair[0]]) +
+      '、Queue ' + displayStructuredValue_(queueLine[pair[0]])
+  );
+}
+
+function structuredLineSignature_(line) {
+  return [line.product, line.billing, line.sets, line.bonus, line.price, line.share,
+    line.overageMethod, line.overagePrice].map(value => String(value === undefined ? '' : value)).join('¦');
+}
+
+function displayStructuredValue_(value) {
+  return value === '' || value === null || value === undefined ? '空白／不適用' : String(value);
+}
+
+/**
+ * Preserve the existing Deposit-Commission gate by projecting structured
+ * facts into its current review-field interface.  Its comparison policy and
+ * tolerance remain untouched.
+ */
+function structuredReviewForProtectedGates_(review, documentMatch) {
+  const out = Object.assign({}, review);
+  if (!documentMatch || !documentMatch.structuredData) return out;
+  const products = documentMatch.structuredData.products.filter(row => {
+    if (!row || typeof row !== 'object') return false;
+    const field = row.product;
+    return field && structuredState_(field.state) === 'confirmed' &&
+      canonicalDocumentProduct_(field.value) === 'Deposit-Commission';
+  });
+  const commissions = uniqueConfirmedStructuredNumbers_(products, 'commission_rate');
+  const buyIns = uniqueConfirmedStructuredNumbers_(products, 'buy_in_price');
+  if (commissions.length === 1) out['Deposit Commission Rate (%)'] = commissions[0];
+  if (buyIns.length === 1) out['Deposit Buy-in Price (%)'] = buyIns[0];
+  return out;
+}
+
+function uniqueConfirmedStructuredNumbers_(rows, fieldName) {
+  const values = rows.map(row => row[fieldName]).filter(field =>
+    field && structuredState_(field.state) === 'confirmed'
+  ).map(field => auditNumber_(field.value)).filter(value => value !== null);
+  return [...new Set(values)];
+}
+
+function writeDocumentMatchTraces_(sheet, traces) {
+  if (!sheet || !traces || !traces.length) return;
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 2) return;
+  const plan = headerNameMigrationPlan_(values[0].map(String), [
+    'Branch ID', 'Structured Review Version', 'Structured Contract Data',
+    'Document Match Result', 'Document Match Detail'
+  ], sheet.getName());
+  if (plan.missing.length) {
+    throw new Error(sheet.getName() + ' cannot write Document Match trace; missing headers: ' + plan.missing.join(', '));
+  }
+  const branchColumn = plan.positions['Branch ID'];
+  const versionColumn = plan.positions['Structured Review Version'];
+  const dataColumn = plan.positions['Structured Contract Data'];
+  const resultColumn = plan.positions['Document Match Result'];
+  const detailColumn = plan.positions['Document Match Detail'];
+  const preflightErrors = [];
+  const targetRows = {};
+  const targetBranches = {};
+  const updates = traces.map((trace, index) => {
+    const label = 'trace ' + (index + 1);
+    const branchId = auditText_(trace && trace.branchId);
+    const rowNumber = Number(trace && trace.targetRowNumber);
+    if (!branchId) preflightErrors.push(label + ' 缺少 Branch ID');
+    if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > values.length) {
+      preflightErrors.push(label + ' targetRowNumber 無效：' + auditText_(trace && trace.targetRowNumber));
+      return null;
+    }
+    if (targetRows[rowNumber]) {
+      preflightErrors.push('target row ' + rowNumber + ' 同時被 ' + targetRows[rowNumber] + ' 與 ' + branchId + ' 指定');
+    } else {
+      targetRows[rowNumber] = branchId;
+    }
+    if (targetBranches[branchId]) {
+      preflightErrors.push('Branch ' + branchId + ' 有多個 writer targets：' +
+        targetBranches[branchId] + ', ' + rowNumber);
+    } else if (branchId) {
+      targetBranches[branchId] = rowNumber;
+    }
+    const row = values[rowNumber - 1];
+    const actualBranchId = auditText_(row[branchColumn]);
+    if (actualBranchId !== branchId) {
+      preflightErrors.push('row ' + rowNumber + ' Branch ID 已變更：預期 ' + branchId + '，目前 ' + actualBranchId);
+    }
+    if (auditText_(row[versionColumn]) !== '1') {
+      preflightErrors.push('row ' + rowNumber + ' Structured Review Version 不是 1');
+    }
+    if (auditText_(row[dataColumn]) === '') {
+      preflightErrors.push('row ' + rowNumber + ' Structured Contract Data 已清空');
+    }
+    return {
+      rowNumber,
+      result:trace.result,
+      detail:trace.detail || trace.reason || ''
+    };
+  });
+  Object.keys(targetBranches).forEach(branchId => {
+    const activeRows = [];
+    values.slice(1).forEach((row, index) => {
+      if (auditText_(row[branchColumn]) !== branchId) return;
+      if (auditText_(row[versionColumn]) === '1' && auditText_(row[dataColumn]) !== '') {
+        activeRows.push(index + 2);
+      }
+    });
+    const expectedRow = targetBranches[branchId];
+    if (activeRows.length !== 1 || activeRows[0] !== expectedRow) {
+      preflightErrors.push('Branch ' + branchId + ' 的最新 Sheet snapshot 必須只有 target row ' +
+        expectedRow + ' 是完整 active structured row；目前 rows：' +
+        (activeRows.length ? activeRows.join(', ') : '無'));
+    }
+  });
+  if (preflightErrors.length) {
+    throw new Error(sheet.getName() + ' Document Match writer preflight failed: ' +
+      preflightErrors.join('；'));
+  }
+  updates.forEach(update => {
+    sheet.getRange(update.rowNumber, resultColumn + 1, 1, 1).setValues([[update.result]]);
+    sheet.getRange(update.rowNumber, detailColumn + 1, 1, 1).setValues([[update.detail]]);
+  });
+}
+
+function contractAudit_(review, documentMatch, planChange, billing, queueRows, qx, control, planDifference) {
   const evidenceType = auditText_(review['Evidence Type']).toLowerCase();
   const name = restaurantNameAudit_(review, queueRows, qx, control);
   const period = contractPeriodAudit_(review, queueRows, qx, control);
   const dates = period.result === 'Pass';
-  const plan = isPass_(review['Full Plan Match']);
+  const structuredMode = documentMatch && documentMatch.result !== 'NO_STRUCTURED_DATA';
+  const plan = structuredMode ? documentMatch.result === 'MATCH' : isPass_(review['Full Plan Match']);
   const depositCommission = depositCommissionAudit_(review, queueRows, qx, control);
   const seals = isPass_(review['Inline Seal']) && isPass_(review['Customer Seal']);
   const directConsent = isPass_(review['Customer Explicit Consent']);
@@ -1241,7 +1915,8 @@ function contractAudit_(review, planChange, billing, queueRows, qx, control, pla
   // Evidence URL is prefilled from Queue when the review row is created.  It
   // is not, by itself, a completed document review: otherwise a fresh queue
   // would incorrectly be reported as a contract mismatch instead of pending.
-  const evidenceExists = !!evidenceType || name.hasInput || period.hasInput || plan || seals || directConsent || agreementEmail ||
+  const evidenceExists = !!evidenceType || name.hasInput || period.hasInput || plan ||
+    (documentMatch && documentMatch.hasInput) || seals || directConsent || agreementEmail ||
     auditText_(review['Deposit Commission Rate (%)']) !== '' ||
     auditText_(review['Deposit Buy-in Price (%)']) !== '' ||
     auditText_(review['Annual Payment Amount (NTD)']) !== '' ||
@@ -1257,6 +1932,15 @@ function contractAudit_(review, planChange, billing, queueRows, qx, control, pla
   if (period.result === 'Fail') return { result: 'Fail', required, reason: period.reason };
   if (depositCommission.result !== 'Pass') {
     return { result: depositCommission.result, required, reason: depositCommission.reason };
+  }
+  if (structuredMode && documentMatch.result === 'NEEDS_REVIEW') {
+    return { result:'Need Review', required, reason:documentMatch.reason };
+  }
+  if (structuredMode && documentMatch.result === 'MISMATCH') {
+    return { result:'Fail', required, reason:documentMatch.reason };
+  }
+  if (structuredMode && isExplicitStructuredPlanVeto_(review['Manual Plan Veto'])) {
+    return { result:'Fail', required, reason:'Contract Evidence Review 已明確標記 Manual Plan Veto 不通過' };
   }
   if (!plan) return { result: 'Fail', required, reason: '合約／信件未確認完整方案一致' };
   if (billing.result !== 'Pass') return { result: billing.result, required, reason: billing.reason };
@@ -2322,6 +3006,11 @@ function normalPlanFamily_(value) {
 function isExplicitFail_(value) {
   if (value === false) return true;
   return ['false', 'fail', 'failed', 'no', 'mismatch', 'mismatched', 'not matched', '不通過', '不一致']
+    .includes(auditText_(value).toLowerCase());
+}
+function isExplicitStructuredPlanVeto_(value) {
+  if (typeof value !== 'string') return false;
+  return ['false', 'fail', 'failed', '不通過', '不一致']
     .includes(auditText_(value).toLowerCase());
 }
 function isPass_(value) { return value === true || ['true', 'pass', 'passed', 'yes', 'approved', 'matched', 'complete'].includes(auditText_(value).toLowerCase()); }

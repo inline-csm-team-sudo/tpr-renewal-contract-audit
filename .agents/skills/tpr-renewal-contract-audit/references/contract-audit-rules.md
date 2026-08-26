@@ -50,11 +50,12 @@
 3. 同一 Branch ID 出現互相矛盾的 Demand 月份時停止該店並註明衝突。
 4. 只讀取實際需要的 Renewal DB 月份分頁。
 5. 建立 Queue 後，以 Branch ID 彙整主產品與全部加購產品。
-6. 逐份閱讀合約、信件、照片及資料夾內相關文件。
-7. 填寫四張覆核表。
-8. 完成 Branch 層級判斷，再將結果套用至該 Branch 的所有產品列。
-9. 回填 Queue 的 `Check` 與單行 `Note`。
-10. 驗證列數、未勾選原因、覆核者及日期，最後寫入 Audit Log。
+6. 逐份閱讀合約、信件、照片及資料夾內相關文件，並完成每個 Branch 的 relevant evidence set 盤點。
+7. 新版案件以 provider-neutral schema 填寫 `Structured Contract Data`；程式逐項與 Queue 比較後計算 Document Match。
+8. 填寫四張覆核表。
+9. 完成 Branch 層級判斷，再將結果套用至該 Branch 的所有產品列。
+10. 回填 Queue 的 `Check` 與單行 `Note`。
+11. 驗證列數、未勾選原因、覆核者及日期，最後寫入 Audit Log。
 
 ## 3. Queue 建立與欄位規則
 
@@ -101,6 +102,7 @@
 - 超額每組單價輸出至小數點後 3 位。
 - 合約贈送組數最多保留小數點後 2 位。
 - RSV 贈送組數為數值 `0` 時，Queue 顯示空白；比較時 RSV 空白與 0 視為沒有贈送。
+- RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。
 - `unlimited` 是有效語意，不能轉為 0、空白或一般數值。
 - 新增或移除產品都屬實質方案變更並需要人工確認。
 
@@ -122,6 +124,24 @@
 文件名稱、OCR 成功或檔案存在都不等於已確認。掃描 PDF／照片必須逐頁目視；店名換行、空白或常見 OCR 異體字需先正規化再比較。
 
 Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件必須閱讀其中所有與本次續約相關的檔案；`Reviewed Evidence File ID` 綁定 Queue 連結本身的檔案 ID 或資料夾 ID，並記錄實際覆核內容的檔案版本。`/file/d/<id>`、`/d/<id>`、`/folders/<id>` 與 `?id=<id>` 都是有效 Drive 連結格式。Queue 連結 ID 與覆核 ID 不一致時必須 `Check=FALSE` 並重新閱讀目前連結，不得沿用舊覆核。
+
+### 5.1 Structured document comparison
+
+- Structured extraction 的唯一操作規格為 [`structured-extraction.md`](structured-extraction.md)。任何 reader、extraction-only shadow test 或局部 visual fallback 都必須先完整讀取該文件；不得以 Queue 方案值提示 reader，文件事實凍結後才可交由 Apps Script 比較。
+- `setupAuditSheets_` 為新建立的 Contract Evidence Review row 自動填入 `Structured Review Version=1`；既有覆核列只有在 Version 與 `Structured Contract Data` 都空白時，才可沿用既有 `Full Plan Match`。任一欄有值即進入 structured mode；此時 JSON 缺失、格式錯誤或 schema 不支援，一律 `NEEDS_REVIEW`，不得回退至人工 TRUE。
+- 同 Branch 的歷史覆核列不得遮蔽 structured intent。任一列只要 Version 或 JSON 任一有值，index 必須選用 structured-intent row；沒有完整 active structured row 時仍須進入 structured mode 並回傳 `NEEDS_REVIEW`，不可改讀較早的 legacy `Full Plan Match`。
+- 目前 schema version 為 `1`。`Structured Contract Data` 是 provider-neutral extraction input；Gemini 是優先 reader，但未來其他 PDF、image 或 scanned-file reader 只要輸出相同 schema 即可。Reader 不得輸出權威的 MATCH／MISMATCH。
+- Apps Script 是 `Document Match Result` 與 `Document Match Detail` 的唯一計算與寫入者。Reader 或 skill 只能寫文件事實、field state、source IDs 與 evidence-set 完整性。
+- `evidence_set.state=Confirmed`、`complete=true` 必須代表已盤點該 Branch 的完整 relevant evidence set，並在 `relevant_source_ids` 列出 relevant files。只讀一份 PDF 不足以證明資料夾案件已完整；無法確認完整性時使用 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
+- 每個 document product 都必須引用一個 `relevant_source_ids` 內的 `source_id`。Folder 不要求每個檔案都建立產品資料，但所有 relevant files 必須先被辨識並納入 evidence set。
+- 產品欄位至少包括 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method 與 Overage Unit Price；Deposit 類另使用 Deposit Type、Setup Fee、Commission Rate、Buy-in Price 等實際適用欄位。
+- 每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`。只有完整檢查該產品相關區塊、表格標題、合併儲存格、註腳及相關文字後，才能使用 `NotMentioned`；OCR 空白或 extraction 沒有回傳值不足以證明文件未記載。無法區分「真的沒寫」與「reader 沒讀到」時使用 `Unreadable`／`Ambiguous`。`Unreadable`／`Ambiguous` 永遠不是 0 或空白，且必須 `NEEDS_REVIEW`。
+- Extraction safety priority 為 `correct Confirmed > Ambiguous/Unreadable > guessed Confirmed`。不得為提高 first-pass usable rate 猜測；`Final wrong-Confirmed count = 0` 是最高優先安全指標。
+- 正常通過產品不強制 page、location 或 raw text。Mismatch、Unreadable、Ambiguous、贈送值、年繳總額、Deposit 費率、同意、用印、特殊申請或人工覆核案件可保存 exception locator。
+- 文件與 Queue 採完整產品 multiset 比對，不依列順序。產品多出、缺少、duplicate 數量不同或任何適用欄位不一致，皆為 `MISMATCH`；只有 evidence set 已確認完整時，文件缺少 Queue 產品才是確定 mismatch，否則為 `NEEDS_REVIEW`。
+- Structured mode 完全不讀 `Full Plan Match` 作為 manual veto；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可以否決 Apps Script 計算出的 MATCH。blank、checkbox 預設的 boolean `false` 與其他 token 都不構成 veto。Structured data 不存在的 legacy review 才維持原本 `Full Plan Match` 行為。
+- `Contract Evidence Review` migration 必須依完整 header name 定位。既有 header reuse，缺少的新 header append 到最右側，舊版額外欄保留；不得刪除、重新排序或覆蓋。必要 header duplicate 或無法唯一 mapping 時必須在任何 Sheet write 前 fail closed。
+- Document Match writer 必須以實際 `targetRowNumber` 寫入，且在真正寫入前用最新 Sheet snapshot 重新確認每個 target Branch 恰好只有該 row 是 Version `1` 且 JSON 非空的完整 active structured row。若 indexing 後新增第二筆 active row、target identity 改變或唯一性無法確認，必須 zero writes 並 fail closed。
 
 ## 6. 原方案續約與方案變更
 
@@ -207,6 +227,7 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - 合約寫買入價格時，應等於 `100% - 抽成比例`。
 - 例如 Queue 抽成 5%，文件可寫抽成 5% 或買入價格 95%。
 - 買入價格 100%、比例空白、數值不同或引用的商業協議缺失，都必須阻擋並列出文件值、Queue 值及正確應有值。
+- 同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
 
 ## 10. 方案家族與特殊申請
 
@@ -275,7 +296,7 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 
 | 分頁 | 必填內容 |
 | --- | --- |
-| Contract Evidence Review | 證據類型、名稱／期間／完整方案、客戶同意、指定信箱、雙方用印、付款週期、文件日期、Deposit 費率、文件年繳總額及其逐字原文／位置、覆核者、日期、狀態、Notes |
+| Contract Evidence Review | 證據類型、名稱／期間、客戶同意、指定信箱、雙方用印、付款週期、文件日期、Deposit 費率、文件年繳總額及其逐字原文／位置、Structured Review Version、provider-neutral Structured Contract Data、由 Apps Script 計算的 Document Match Result／Detail、覆核者、日期、狀態、Notes |
 | Plan Classification Review | Legacy membership、選填首約日、預期家族、舊／新方案家族、舊／新 Plan Code、匹配規則、例外、覆核者、日期、Notes；明確 FALSE／Fail 為人工 veto |
 | Special Approval Review | 是否需要、核准狀態、佐證、覆核者、日期、Notes |
 | Share Group Review | 成員、統編、合約、超額單價、狀態、覆核者、日期、Notes |
@@ -310,11 +331,14 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - 勾選／未勾選的產品列數。
 - 所有 `Check=FALSE` 列的 Note 均非空白。
 - 每個 Branch 的合約證據都已覆核。
+- structured mode 的每個 Branch 都有 schema version 1、已確認完整的 relevant evidence set 與 Apps Script 計算的 Document Match；不得由 reader 寫入 MATCH／MISMATCH。
 - 所有特殊申請與 Share Plan 都有對應狀態。
 - Audit Log 已新增本次批次紀錄；Build Queue 的 Operation 為 `Build Queue`，合約稽核的 Operation 為 `Contract Audit`，不得混用。
 - Queue 畫面重新整理後，Check 與 Note 可見且格式正常。
 
 回報時同時列出 Branch 數與產品列數，避免將兩者混為一談。
+
+Structured extraction 指令變更時，另以同一批 15 份文件做 Before／After extraction-only shadow test；兩輪 reader 都不得取得 Queue 方案值。逐案比較 canonical product rows、billing period、usage／bonus sets、product price、Share、overage、Deposit／Deposit-Commission、Restaurant、period 與 visual fallback，並統計 first-pass usable rate、product classification error rate、numeric extraction error rate、wrong-Confirmed count、visual fallback case rate、visual fallback field count、full-document reread count，以及每份文件第一次 extraction 後需修正／補讀的 field 數（First-pass correction burden）。
 
 ## 15. 維護方式
 

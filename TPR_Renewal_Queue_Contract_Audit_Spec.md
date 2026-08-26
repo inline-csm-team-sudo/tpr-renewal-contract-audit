@@ -279,7 +279,7 @@ Document Match writer 只能依實際 `targetRowNumber` 寫入。真正寫入前
 
 Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
 
-每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。
+每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。`Deposit-Commission` 是逐筆交易費率產品，`billing_period` 固定為 `NotApplicable` 且不參與 Document Comparison；不得由 Queue、主產品或年繳總額猜成 monthly／annual。其 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數仍須精確一致。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
 
 自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會將文件、Queue 與 Renewal DB 日期正規化為 `yyyy-MM-dd` 後只比較年月日，不再只依賴人工填寫的 `Contract Period Match`，也不以時、分、秒差異判定不一致。
 
@@ -289,6 +289,8 @@ Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`�
 - `Deposit Buy-in Price (%)`：文件寫明餐廳買入價格時填寫。
 
 至少必須填寫其中一欄。程式會以 Queue／Renewal DB 的佣金比例為準，檢查：
+
+- `Deposit-Commission.billing_period` 不參與比較；交易費率本身沒有 recurring billing cadence。
 
 - 文件抽成比例 = Queue 的 `Deposit-Commission` 比例。
 - 文件買入價格 = `100% - Deposit-Commission 比例`。

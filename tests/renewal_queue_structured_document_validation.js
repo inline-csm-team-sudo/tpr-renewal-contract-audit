@@ -261,7 +261,7 @@ const commissionQueue = [
 ];
 const commissionProduct = product({
   product:field('Confirmed', 'Deposit-Commission'),
-  billing_period:field('Confirmed', 'annual'),
+  billing_period:field('NotApplicable'),
   usage_sets:field('NotApplicable'),
   bonus_sets:field('NotApplicable'),
   price:field('NotApplicable'),
@@ -272,6 +272,91 @@ const commissionProduct = product({
 });
 data = structuredData([product(), commissionProduct]);
 assert.strictEqual(match(data, commissionQueue).result, 'MATCH');
+
+// Deposit fixed fees keep the existing monthly -> annual x12 normalization,
+// while transaction-based Deposit-Commission rows have no recurring cadence.
+const travelQueue = [
+  queueRow({ sets:7200, bonus:600, price:42000, overagePrice:5.5 }),
+  queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:'', price:18000,
+    overageMethod:'B2C', overagePrice:5 }),
+  queueRow({ product:'Deposit-Commission', billing:'annual', sets:'', bonus:5, price:'',
+    overageMethod:'Credit Card', overagePrice:'' })
+];
+const travelDeposit = product({
+  product:field('Confirmed', 'Deposit'),
+  billing_period:field('Confirmed', 'monthly'),
+  usage_sets:field('NotApplicable'),
+  bonus_sets:field('NotApplicable'),
+  price:field('Confirmed', 1500),
+  share_plan_id:field('NotApplicable'),
+  deposit_type:field('Confirmed', 'B2C'),
+  setup_fee:field('Confirmed', 5)
+});
+const travelRsv = product({
+  usage_sets:field('Confirmed', 7200), bonus_sets:field('Confirmed', 600),
+  price:field('Confirmed', 42000), overage_unit_price:field('Confirmed', 5.5)
+});
+function travelCommission(overrides = {}) {
+  return product(Object.assign({
+    product:field('Confirmed', 'Deposit-Commission'),
+    billing_period:field('NotApplicable'),
+    usage_sets:field('NotApplicable'),
+    bonus_sets:field('NotApplicable'),
+    price:field('NotApplicable'),
+    share_plan_id:field('NotApplicable'),
+    deposit_type:field('Confirmed', 'Credit Card'),
+    buy_in_price:field('Confirmed', 95)
+  }, overrides));
+}
+data = structuredData([travelRsv, travelDeposit, travelCommission()]);
+result = match(data, travelQueue);
+assert.strictEqual(result.result, 'MATCH');
+
+data = structuredData([
+  travelRsv, travelDeposit, travelCommission({ buy_in_price:field('Confirmed', 94) })
+]);
+assert.strictEqual(match(data, travelQueue).result, 'MISMATCH');
+
+data = structuredData([
+  travelRsv, travelDeposit, travelCommission({ deposit_type:field('Confirmed', 'Virtual ATM') })
+]);
+assert.strictEqual(match(data, travelQueue).result, 'MISMATCH');
+
+data = structuredData([travelRsv, travelDeposit]);
+assert.strictEqual(match(data, travelQueue).result, 'MISMATCH');
+
+data = structuredData([travelRsv, travelDeposit, travelCommission(), travelCommission()]);
+assert.strictEqual(match(data, travelQueue).result, 'MISMATCH');
+
+// Every multi-rate row may match the document while the existing protected
+// Deposit-Commission policy still keeps the Branch in Need Review.
+const multiRateQueue = [
+  queueRow({ sets:1200, price:12000, overagePrice:10 }),
+  queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:'', price:0,
+    overageMethod:'B2C', overagePrice:5 }),
+  queueRow({ product:'Deposit-Commission', billing:'annual', sets:'', bonus:4.5, price:'',
+    overageMethod:'Credit Card', overagePrice:'' }),
+  queueRow({ product:'Deposit-Commission', billing:'annual', sets:'', bonus:1.5, price:'',
+    overageMethod:'Virtual ATM', overagePrice:'' })
+];
+const zeroDeposit = product({
+  product:field('Confirmed', 'Deposit'), billing_period:field('Confirmed', 'annual'),
+  usage_sets:field('NotApplicable'), bonus_sets:field('NotApplicable'),
+  price:field('Confirmed', 0), share_plan_id:field('NotApplicable'),
+  deposit_type:field('Confirmed', 'B2C'), setup_fee:field('Confirmed', 5)
+});
+const creditCardCommission = travelCommission({ buy_in_price:field('Confirmed', 95.5) });
+const virtualAtmCommission = travelCommission({
+  deposit_type:field('Confirmed', 'Virtual ATM'), buy_in_price:field('Confirmed', 98.5)
+});
+data = structuredData([
+  product({ usage_sets:field('Confirmed', 1200), price:field('Confirmed', 12000),
+    overage_unit_price:field('Confirmed', 10) }),
+  zeroDeposit, creditCardCommission, virtualAtmCommission
+]);
+result = match(data, multiRateQueue);
+assert.strictEqual(result.result, 'MATCH');
+assert.strictEqual(contract(reviewFor(data), result, multiRateQueue).result, 'Need Review');
 
 // Protected downstream policy cases: structured MATCH does not bypass later gates.
 const pass = { result:'Pass', reason:'' };

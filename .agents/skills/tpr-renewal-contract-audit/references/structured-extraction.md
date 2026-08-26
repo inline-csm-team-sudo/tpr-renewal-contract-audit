@@ -99,6 +99,9 @@ Ocard、generic add-on 或其他未支援名稱不可硬套 taxonomy；無法唯
 - `billing_period`：只取能唯一連結到該產品的明示週期，正規值使用 `annual`、`monthly`、
   `6mo`、`3mo`。合約起訖期間不等於付款週期。不得由年繳總額、`price × 12` 或 Queue 值推測。
   文件月費 800 應保留 `price=800`、`billing_period=monthly`；年繳主產品與月繳 add-on 必須分列。
+  `Deposit-Commission` 是逐筆交易費率產品，沒有 monthly／annual recurring billing cadence；其
+  `billing_period` 必須使用 `NotApplicable`，不得由主產品、固定 Deposit、年繳總額或 Queue 值猜測。
+  Apps Script 的 Document Comparison 不比較 `Deposit-Commission.billing_period`。
 - `usage_sets`：保留文件列出的付費／使用組數；`unlimited` 是字面有效值，不轉為 0。
 - `bonus_sets`：先檢查欄位標題、合併儲存格、該產品 row、註腳與相關方案文字。明示 0 是
   `Confirmed(0)`；完成全部檢查且未記載才是 `NotMentioned`。
@@ -198,7 +201,9 @@ fields; restaurant, period, and annual total; then visual seal, signature, and c
 Use only RSV, RwG, Deposit, Deposit-Commission, Voice, Survey, or eCoupon when product.state is
 Confirmed. Split Deposit fixed fees from every Deposit-Commission payment method or rate. Preserve
 literal row price and billing cadence; contract duration and annual total do not determine a product's
-billing period or price.
+billing period or price. Deposit-Commission is a per-transaction rate with no recurring billing cadence:
+set its billing_period to NotApplicable and never infer monthly or annual from the main product, fixed
+Deposit fee, annual total, or Queue.
 
 Apply the field-state gate strictly. NotMentioned requires a complete inspection of the product section,
 headers, merged cells, footnotes, attachments, and related text. OCR blank or an omitted extraction is not

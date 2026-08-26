@@ -1771,11 +1771,14 @@ function structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnual
     adjusted.billing = 'annual';
     adjusted.price = String(monthlyPrice * 12);
   }
+  const product = queueLine.product || documentLine.product;
+  // Deposit-Commission is a per-transaction rate, not a recurring charge.
+  // Its document billing_period is therefore NotApplicable and must not be
+  // inferred from the main product or compared with Queue's inherited period.
   const fields = [
     ['billing', '付款週期'], ['sets', '使用組數'], ['bonus', '贈送組數'], ['price', '價格'],
     ['share', 'Share Plan ID'], ['overageMethod', '超額計算方式'], ['overagePrice', '超額單價']
-  ];
-  const product = queueLine.product || documentLine.product;
+  ].filter(pair => product !== 'Deposit-Commission' || pair[0] !== 'billing');
   return fields.filter(pair => adjusted[pair[0]] !== queueLine[pair[0]]).map(pair =>
     product + ' ' + pair[1] + '：文件 ' + displayStructuredValue_(documentLine[pair[0]]) +
       '、Queue ' + displayStructuredValue_(queueLine[pair[0]])

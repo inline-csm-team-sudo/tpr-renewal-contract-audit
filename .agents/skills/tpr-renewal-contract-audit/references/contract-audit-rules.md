@@ -139,6 +139,7 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - Extraction safety priority 為 `correct Confirmed > Ambiguous/Unreadable > guessed Confirmed`。不得為提高 first-pass usable rate 猜測；`Final wrong-Confirmed count = 0` 是最高優先安全指標。
 - 正常通過產品不強制 page、location 或 raw text。Mismatch、Unreadable、Ambiguous、贈送值、年繳總額、Deposit 費率、同意、用印、特殊申請或人工覆核案件可保存 exception locator。
 - 文件與 Queue 採完整產品 multiset 比對，不依列順序。產品多出、缺少、duplicate 數量不同或任何適用欄位不一致，皆為 `MISMATCH`；只有 evidence set 已確認完整時，文件缺少 Queue 產品才是確定 mismatch，否則為 `NEEDS_REVIEW`。
+- `Deposit-Commission` 是逐筆交易費率產品，不具有 monthly／annual recurring billing cadence。Structured extraction 的 `billing_period` 使用 `NotApplicable`，Document Comparison 不比較該欄，也不得用 Queue 週期引導 extraction；仍須精確比較 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數。固定費 `Deposit` 的 `monthly → annual ×12` 規則維持不變。
 - Structured mode 完全不讀 `Full Plan Match` 作為 manual veto；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可以否決 Apps Script 計算出的 MATCH。blank、checkbox 預設的 boolean `false` 與其他 token 都不構成 veto。Structured data 不存在的 legacy review 才維持原本 `Full Plan Match` 行為。
 - `Contract Evidence Review` migration 必須依完整 header name 定位。既有 header reuse，缺少的新 header append 到最右側，舊版額外欄保留；不得刪除、重新排序或覆蓋。必要 header duplicate 或無法唯一 mapping 時必須在任何 Sheet write 前 fail closed。
 - Document Match writer 必須以實際 `targetRowNumber` 寫入，且在真正寫入前用最新 Sheet snapshot 重新確認每個 target Branch 恰好只有該 row 是 Version `1` 且 JSON 非空的完整 active structured row。若 indexing 後新增第二筆 active row、target identity 改變或唯一性無法確認，必須 zero writes 並 fail closed。
@@ -223,6 +224,7 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 
 ### 9.3 B2C／Commission
 
+- `Deposit-Commission` 的付款週期不是 comparison field；不得因 Queue 繼承 annual／monthly 而要求文件提供或猜測 recurring billing cadence。
 - 合約寫抽成比例時，必須等於 Queue／Renewal DB 的 `Deposit-Commission` 比例。
 - 合約寫買入價格時，應等於 `100% - 抽成比例`。
 - 例如 Queue 抽成 5%，文件可寫抽成 5% 或買入價格 95%。

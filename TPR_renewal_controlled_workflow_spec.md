@@ -169,18 +169,24 @@ Renewal DB 是初稿而非最終真實來源。若使用者在 audit 之外另�
 
 ## 8. Share Group 跨店家檢查
 
-新 Share Group 只能依 Renewal DB 的**新** Share ID 與 Queue 最終值建立。原始 TPR 的舊 Share Plan ID 僅供判斷加入、退出或變更，不得用於界定續約後群組。
+新 Share Group 由 current Queue 的新 Share ID 界定；原始 TPR 的舊 Share ID 只供判斷加入、退出或
+變更。Renewal DB 完整 Share member set 不再是 Share Contract Audit runtime gate，「其他 Branch 是否
+本月應續約但未進 Queue」另屬 Renewal Completeness workflow。
 
-只要新 Share ID 非空，必須取得該 ID 的全部 Branch ID，不限於本批剛選取的店家，並檢查：
+只要 current Queue 的 Share ID 非空，必須執行：
 
 | 項目 | 來源 | 通過條件 |
 | --- | --- | --- |
-| 成員 | 新 Share ID、Queue、合約附件 | 全部店家已納入 Queue，且附件名單一致 |
-| 統編 | Renewal DB `Tax reg number` | 同一群組正規化後完全一致 |
-| 最終結束日 | Renewal DB、Queue、合約 | 全部店家三方一致 |
-| 超額條件 | Renewal DB、Queue、合約 | 超額方式與單價全數一致 |
+| Share ID／Contract | current-batch document coverage manifest、Queue | 文件 Share ID 等於 Queue Share ID |
+| Member／Coverage | 所有 current relevant evidence 的 covered-member union、current Queue | Branch set exact match；多份合約允許取 union |
+| Tax ID | batch preparation 從唯讀 Chargebee TW 建立的 `Branch Tax ID Reference` | 同組 normalized Tax ID 相同；不同則人工確認特殊跨統編 |
+| Overage | current-batch Structured Contract Data、Queue | 每個 current member 的超額值一致 |
+| Status | 上述四項 | 程式派生，不要求人工另填 Pass |
 
-任一成員缺漏或不一致時，該新 Share Group 下所有 Branch ID 都不可 Ready。退出該新群組的店家不受該群組結果連帶阻擋；但加入、退出或變更 Share ID 本身屬 `Plan Change=Yes`，仍需雙方用印文件。
+Chargebee 找不到 Branch、Tax ID 空白／衝突，文件 member 多於 Queue、Queue member 未被 evidence
+coverage、Share ID／overage 不明確時均 fail closed。Branch-level 方案或合約 mismatch 由原 gate 處理，
+不可讓同 Share ID 的其他 Branch 一起 Share Fail。加入、退出或變更 Share ID 本身仍屬
+`Plan Change=Yes`，既有文件與特殊申請 policy 不變。
 
 ## 9. 方案合規與特殊申請
 

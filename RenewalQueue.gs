@@ -11,7 +11,8 @@ const RENEWAL_QUEUE_VALIDATED_TEST_WORKBOOK_ID = '1ziGxJPwHpKAG8k6wVTQ8EobadNcEk
 const RENEWAL_QUEUE_ENVIRONMENT_KEYS = [
   'ENVIRONMENT', 'TARGET_WORKBOOK_ID', 'EXPECTED_WORKBOOK_NAME',
   'ORIGINAL_TPR_SPREADSHEET_ID', 'RENEWAL_DB_SPREADSHEET_ID',
-  'RSV_PLAN_REFERENCE_SPREADSHEET_ID', 'DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID'
+  'RSV_PLAN_REFERENCE_SPREADSHEET_ID', 'DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID',
+  'CHARGEBEE_IMPORT_SPREADSHEET_ID'
 ];
 const QUEUE_LEADING_HEADERS = ['', 'Check', 'Note', 'Demand', 'Comment', '合約'];
 const QUEUE_HELPER_HEADERS = ['Batch ID', 'Original TPR Row', 'Renewal DB Row', 'Transformation Status'];
@@ -54,8 +55,16 @@ const SPECIAL_REVIEW_HEADERS = [
 ];
 const SHARE_REVIEW_HEADERS = [
   'Share Plan ID', 'Member Check', 'Tax ID Check', 'Contract Check',
-  'Overage Check', 'Status', 'Reviewer', 'Reviewed At', 'Notes'
+  'Overage Check', 'Status', 'Reviewer', 'Reviewed At', 'Notes',
+  'Automated Check Detail', 'Review Batch ID'
 ];
+const BRANCH_TAX_ID_REFERENCE_HEADERS = [
+  'Branch ID', 'Tax ID', 'Source Spreadsheet ID', 'Source Tab', 'Source Row',
+  'Imported At', 'Source Rows', 'Import Status', 'Notes', 'Review Batch ID'
+];
+const CHARGEBEE_BRANCH_TAX_ID_TAB = 'TW';
+const CHARGEBEE_BRANCH_ID_COLUMN = 1;
+const CHARGEBEE_TAX_ID_COLUMN = 17;
 const BONUS_AUDIT_SETTINGS = [
   ['Bonus Warning Ratio', 0.12, '贈送組數／使用組數超過此比例時需人工確認；例如 0.12 = 12%。'],
   ['Bonus Critical Ratio', 0.30, '贈送組數／使用組數超過此比例時判定為嚴重異常。'],
@@ -71,6 +80,7 @@ const PLAN_ORIGIN_SETTINGS = [
   ['RSV Plan Reference Tab', 'TMS 方案', 'RSV／RwG 方案來源分頁。'],
   ['RSV Plan Code Header', 'Plan Code', '方案來源的永久代碼欄；既有代碼不得改寫。'],
   ['Deposit Plan Reference Tab', '訂金方案', 'Deposit 方案來源分頁；正常 Queue／Audit 流程唯讀。'],
+  ['Chargebee Import Spreadsheet ID', '1TPp2_4wo_5VNBdMOLcnFzIA1X1EIhRv5sCMiFlLis6s', 'Branch Tax ID 權威來源；所有 Queue／Audit 流程永久唯讀。'],
   ['Legacy Branch Master Tab', 'Legacy Branch Master', 'Legacy cohort 主檔；正常流程不得重新掃描 Raw : TPR。'],
   ['Legacy Branch ID Header', 'Branch ID', 'Legacy Branch Master 的 Branch ID 欄位標題。']
 ];
@@ -127,7 +137,8 @@ function renewalEnvironmentConfig_() {
     originalTprSpreadsheetId:auditText_(properties.ORIGINAL_TPR_SPREADSHEET_ID),
     renewalDbSpreadsheetId:auditText_(properties.RENEWAL_DB_SPREADSHEET_ID),
     rsvPlanReferenceSpreadsheetId:auditText_(properties.RSV_PLAN_REFERENCE_SPREADSHEET_ID),
-    depositPlanReferenceSpreadsheetId:auditText_(properties.DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID)
+    depositPlanReferenceSpreadsheetId:auditText_(properties.DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID),
+    chargebeeImportSpreadsheetId:auditText_(properties.CHARGEBEE_IMPORT_SPREADSHEET_ID)
   };
 }
 
@@ -149,7 +160,8 @@ function assertConfiguredSourceIds_(runtime, control) {
     ['Original TPR Spreadsheet ID', runtime.config.originalTprSpreadsheetId],
     ['Renewal DB Spreadsheet ID', runtime.config.renewalDbSpreadsheetId],
     ['RSV Plan Reference Spreadsheet ID', runtime.config.rsvPlanReferenceSpreadsheetId],
-    ['Plan Reference Spreadsheet ID', runtime.config.depositPlanReferenceSpreadsheetId]
+    ['Plan Reference Spreadsheet ID', runtime.config.depositPlanReferenceSpreadsheetId],
+    ['Chargebee Import Spreadsheet ID', runtime.config.chargebeeImportSpreadsheetId]
   ];
   const errors = checks.filter(item => auditText_(control[item[0]]) !== item[1])
     .map(item => item[0] + '：Control=' + (auditText_(control[item[0]]) || '空白') +
@@ -210,13 +222,14 @@ function buildQueueWithMode_(dryRun) {
   const queueTimeZone = ss.getSpreadsheetTimeZone();
   const controlSheet = ss.getSheetByName('Control');
   let control = readSettings_(controlSheet);
+  if (!dryRun) {
+    ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
+    control = readSettings_(controlSheet);
+  }
   assertConfiguredSourceIds_(runtime, control);
   if (dryRun) {
     validatePlanReferenceSourcesReadOnly_(ss, control);
   } else {
-    ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
-    control = readSettings_(controlSheet);
-    assertConfiguredSourceIds_(runtime, control);
     syncPlanCatalog_(ss, control);
   }
   const manualIds = String(control['Selected Branch IDs'] || '')
@@ -594,7 +607,6 @@ function runContractAudit() {
   const ss = runtime.ss;
   const controlSheet = ss.getSheetByName('Control');
   let control = readSettings_(controlSheet);
-  assertConfiguredSourceIds_(runtime, control);
   ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
   control = readSettings_(controlSheet);
   assertConfiguredSourceIds_(runtime, control);
@@ -616,7 +628,7 @@ function runContractAudit() {
   const rows = queueValues.slice(1).map((values, i) => ({ row: i + 2, values }));
   const byBranch = groupBy_(rows, r => auditText_(auditGet_(r.values, qx, 'Branch ID')));
   const origins = loadLegacyBranchOrigins_(ss, control, Object.keys(byBranch));
-  const shareOverageSource = shareOverageSourceAudit_(ss, control, byBranch, qx);
+  const shareOverageSource = queueShareOverageAudit_(byBranch, qx);
   const activeContractReviewBatchId = auditText_(control['Active Contract Review Batch ID']);
   const evidence = indexedEvidenceReviews_(
     ss.getSheetByName('Contract Evidence Review'), 'Branch ID', Object.keys(byBranch),
@@ -627,12 +639,25 @@ function runContractAudit() {
     planReviewSheet, 'Branch ID', Object.keys(byBranch), activeContractReviewBatchId
   );
   const approvals = indexedReview_(ss.getSheetByName('Special Approval Review'), 'Branch ID');
-  const shares = indexedReview_(ss.getSheetByName('Share Group Review'), 'Share Plan ID');
+  const queueShareIds = queueSharePlanIds_(byBranch, qx);
+  const shares = indexedCurrentBatchReview_(
+    ss.getSheetByName('Share Group Review'), 'Share Plan ID', queueShareIds,
+    activeContractReviewBatchId
+  );
+  const branchTaxIds = indexedCurrentBatchReview_(
+    ss.getSheetByName('Branch Tax ID Reference'), 'Branch ID', Object.keys(byBranch),
+    activeContractReviewBatchId
+  );
+  const shareAudits = structuredShareGroupAudits_(
+    byBranch, qx, evidence, branchTaxIds, shares, activeContractReviewBatchId
+  );
   const bonusReference = loadRsvBonusReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const familyReference = loadRsvFamilyReference_(ss.getSheetByName('Plan Reference Snapshot'));
   const resultRows = [];
   const documentMatchTraces = [];
   const planClassificationTraces = [];
+  const shareGroupTraces = Object.keys(shareAudits.byGroup)
+    .map(shareId => shareAudits.byGroup[shareId].trace).filter(Boolean);
   const affectedCatalogChanges = {};
   let readyBranches = 0;
 
@@ -648,7 +673,7 @@ function runContractAudit() {
     const planEntry = plans[branchId] || null;
     const plan = planEntry ? planEntry.review : {};
     const approval = approvals[branchId] || {};
-    const share = shareAudit_(queueRows, qx, shares, shareOverage);
+    const share = shareAudit_(queueRows, qx, shareAudits.byGroup);
     const renewalDataMissing = queueRows.some(r => auditText_(auditGet_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
     let documentMatch = structuredDocumentMatchAudit_(ev, queueRows, qx);
     if (evidenceEntry && evidenceEntry.currentBatchMode && documentMatch.result === 'NO_STRUCTURED_DATA') {
@@ -746,6 +771,10 @@ function runContractAudit() {
     ss.getSheetByName('Contract Evidence Review'), documentMatchTraces,
     activeContractReviewBatchId
   );
+  writeShareGroupTraces_(
+    ss.getSheetByName('Share Group Review'), shareGroupTraces,
+    activeContractReviewBatchId
+  );
 
   queue.getRange(2, 1, resultRows.length, queueHeaders.length).setValues(resultRows);
   queue.getRange(2, requiredHeader_(qx, 'Check', 'Queue') + 1, resultRows.length, 1)
@@ -759,7 +788,8 @@ function setupAuditSheets_(ss, queue) {
   ensureReviewSheetHeadersByName_(ss, 'Contract Evidence Review', EVIDENCE_REVIEW_HEADERS.concat(['Review Batch ID']));
   ensureReviewSheetHeadersByName_(ss, 'Plan Classification Review', PLAN_REVIEW_HEADERS.concat(['Review Batch ID']));
   ensureReviewSheet_(ss, 'Special Approval Review', SPECIAL_REVIEW_HEADERS);
-  ensureReviewSheet_(ss, 'Share Group Review', SHARE_REVIEW_HEADERS);
+  ensureReviewSheetHeadersByName_(ss, 'Share Group Review', SHARE_REVIEW_HEADERS);
+  ensureReviewSheetHeadersByName_(ss, 'Branch Tax ID Reference', BRANCH_TAX_ID_REFERENCE_HEADERS);
 }
 
 function prepareContractReviewBatch() {
@@ -769,6 +799,7 @@ function prepareContractReviewBatch() {
     const runtime = openConfiguredRenewalWorkbook_();
     const ss = runtime.ss;
     const controlSheet = ss.getSheetByName('Control');
+    ensureSettings_(controlSheet, PLAN_ORIGIN_SETTINGS.concat(BONUS_AUDIT_SETTINGS));
     const control = readSettings_(controlSheet);
     assertConfiguredSourceIds_(runtime, control);
     if (auditText_(control['Active Contract Review Batch ID'])) {
@@ -811,9 +842,21 @@ function prepareContractReviewBatch() {
     appendMissingReviewRows_(ss.getSheetByName('Special Approval Review'), branchIds, id => [id]);
     const shareIds = shareColumn === null ? [] : [...new Set(queueValues.slice(1)
       .map(row => auditText_(row[shareColumn])).filter(Boolean))];
-    appendMissingReviewRows_(ss.getSheetByName('Share Group Review'), shareIds, id => [id]);
+    const taxSnapshot = readChargebeeBranchTaxIds_(runtime.config, branchIds, new Date());
+    const shareSheet = ss.getSheetByName('Share Group Review');
+    appendCurrentBatchKeyRows_(shareSheet, 'Share Plan ID', shareIds, batchId, shareId => ({
+      'Share Plan ID':shareId,
+      'Review Batch ID':batchId
+    }));
+    appendBranchTaxIdReferenceRows_(
+      ss.getSheetByName('Branch Tax ID Reference'), taxSnapshot.rows, batchId
+    );
     assertCurrentBatchRows_(evidenceSheet, branchIds, batchId);
     assertCurrentBatchRows_(planSheet, branchIds, batchId);
+    assertCurrentBatchKeyRows_(shareSheet, 'Share Plan ID', shareIds, batchId);
+    assertCurrentBatchKeyRows_(
+      ss.getSheetByName('Branch Tax ID Reference'), 'Branch ID', branchIds, batchId
+    );
     setControlSettingsAtomically_(controlSheet, {
       'Active Contract Review Batch ID':batchId,
       'Active Contract Review Created At':new Date()
@@ -826,25 +869,29 @@ function prepareContractReviewBatch() {
 }
 
 function appendCurrentBatchRows_(sheet, branchIds, batchId, makeValues) {
+  return appendCurrentBatchKeyRows_(sheet, 'Branch ID', branchIds, batchId, makeValues);
+}
+
+function appendCurrentBatchKeyRows_(sheet, keyHeader, ids, batchId, makeValues) {
   const values = sheet.getDataRange().getValues();
   const headers = values[0].map(String);
-  const plan = headerNameMigrationPlan_(headers, ['Branch ID', 'Review Batch ID'], sheet.getName());
+  const plan = headerNameMigrationPlan_(headers, [keyHeader, 'Review Batch ID'], sheet.getName());
   if (plan.missing.length) throw new Error(sheet.getName() + ' missing headers: ' + plan.missing.join(', '));
-  const branchColumn = plan.positions['Branch ID'];
+  const keyColumn = plan.positions[keyHeader];
   const batchColumn = plan.positions['Review Batch ID'];
   const existing = {};
   values.slice(1).forEach((row, index) => {
     if (auditText_(row[batchColumn]) !== batchId) return;
-    const branchId = auditText_(row[branchColumn]);
-    if (!branchId) return;
-    (existing[branchId] || (existing[branchId] = [])).push(index + 2);
+    const id = auditText_(row[keyColumn]);
+    if (!id) return;
+    (existing[id] || (existing[id] = [])).push(index + 2);
   });
-  const conflicts = branchIds.filter(id => existing[id] && existing[id].length)
+  const conflicts = ids.filter(id => existing[id] && existing[id].length)
     .map(id => id + ': rows ' + existing[id].join(', '));
   if (conflicts.length) throw new Error(sheet.getName() + ' batch rows already exist: ' + conflicts.join('；'));
-  const rows = branchIds.map(branchId => {
+  const rows = ids.map(id => {
     const row = headers.map(() => '');
-    const fields = makeValues(branchId);
+    const fields = makeValues(id);
     Object.keys(fields).forEach(header => {
       const position = headerNameMigrationPlan_(headers, [header], sheet.getName()).positions[header];
       row[position] = fields[header];
@@ -855,17 +902,21 @@ function appendCurrentBatchRows_(sheet, branchIds, batchId, makeValues) {
 }
 
 function assertCurrentBatchRows_(sheet, branchIds, batchId) {
+  return assertCurrentBatchKeyRows_(sheet, 'Branch ID', branchIds, batchId);
+}
+
+function assertCurrentBatchKeyRows_(sheet, keyHeader, ids, batchId) {
   const values = sheet.getDataRange().getValues();
-  const plan = headerNameMigrationPlan_(values[0].map(String), ['Branch ID', 'Review Batch ID'], sheet.getName());
-  const rowsByBranch = {};
+  const plan = headerNameMigrationPlan_(values[0].map(String), [keyHeader, 'Review Batch ID'], sheet.getName());
+  const rowsById = {};
   values.slice(1).forEach((row, index) => {
     if (auditText_(row[plan.positions['Review Batch ID']]) !== batchId) return;
-    const branchId = auditText_(row[plan.positions['Branch ID']]);
-    if (!branchId) return;
-    (rowsByBranch[branchId] || (rowsByBranch[branchId] = [])).push(index + 2);
+    const id = auditText_(row[plan.positions[keyHeader]]);
+    if (!id) return;
+    (rowsById[id] || (rowsById[id] = [])).push(index + 2);
   });
-  const errors = branchIds.filter(id => !rowsByBranch[id] || rowsByBranch[id].length !== 1)
-    .map(id => id + ': ' + (rowsByBranch[id] ? rowsByBranch[id].join(', ') : 'missing'));
+  const errors = ids.filter(id => !rowsById[id] || rowsById[id].length !== 1)
+    .map(id => id + ': ' + (rowsById[id] ? rowsById[id].join(', ') : 'missing'));
   if (errors.length) throw new Error(sheet.getName() + ' current-batch identity failed: ' + errors.join('；'));
 }
 
@@ -882,6 +933,82 @@ function setControlSettingsAtomically_(sheet, updates) {
   const output = range.getValues();
   Object.keys(updates).forEach(key => { output[rows[key] - start][0] = updates[key]; });
   range.setValues(output);
+}
+
+function normalizeTaxId_(value) {
+  return String(value === null || value === undefined ? '' : value).trim();
+}
+
+function readChargebeeBranchTaxIds_(config, branchIds, importedAt) {
+  const sourceId = auditText_(config && config.chargebeeImportSpreadsheetId);
+  if (!sourceId) throw new Error('CHARGEBEE_IMPORT_SPREADSHEET_ID is not configured. Zero writes performed.');
+  const sourceBook = SpreadsheetApp.openById(sourceId);
+  const sourceSheet = sourceBook.getSheetByName(CHARGEBEE_BRANCH_TAX_ID_TAB);
+  if (!sourceSheet) throw new Error('Chargebee source tab not found: ' + CHARGEBEE_BRANCH_TAX_ID_TAB + '. Zero writes performed.');
+  const wanted = new Set(branchIds.map(auditText_).filter(Boolean));
+  const display = sourceSheet.getRange(
+    1, CHARGEBEE_BRANCH_ID_COLUMN, sourceSheet.getLastRow(), CHARGEBEE_TAX_ID_COLUMN
+  ).getDisplayValues();
+  const hits = {};
+  display.slice(1).forEach((row, index) => {
+    const branchId = auditText_(row[CHARGEBEE_BRANCH_ID_COLUMN - 1]);
+    if (!branchId || !wanted.has(branchId)) return;
+    (hits[branchId] || (hits[branchId] = [])).push({
+      rowNumber:index + 2,
+      taxId:normalizeTaxId_(row[CHARGEBEE_TAX_ID_COLUMN - 1])
+    });
+  });
+  const rows = branchIds.map(branchId => {
+    const matches = hits[branchId] || [];
+    const taxIds = [...new Set(matches.map(match => match.taxId).filter(Boolean))];
+    let status = 'PASS';
+    let notes = '';
+    if (!matches.length) {
+      status = 'NEEDS_REVIEW';
+      notes = 'Chargebee TW 找不到 Branch ID。';
+    } else if (taxIds.length === 0) {
+      status = 'NEEDS_REVIEW';
+      notes = 'Chargebee TW 的 Tax ID 為空白。';
+    } else if (taxIds.length > 1) {
+      status = 'NEEDS_REVIEW';
+      notes = 'Chargebee TW duplicate Branch ID 的 normalized Tax ID 不一致：' + taxIds.join(', ');
+    } else if (matches.length > 1) {
+      notes = 'Chargebee TW duplicate Branch ID 但 normalized Tax ID 一致；source rows ' +
+        matches.map(match => match.rowNumber).join(', ') + '。';
+    }
+    return {
+      branchId,
+      taxId:taxIds.length === 1 ? taxIds[0] : '',
+      sourceSpreadsheetId:sourceId,
+      sourceTab:CHARGEBEE_BRANCH_TAX_ID_TAB,
+      sourceRow:matches.length ? matches[0].rowNumber : '',
+      importedAt:importedAt || new Date(),
+      sourceRows:matches.map(match => match.rowNumber).join(', '),
+      status,
+      notes
+    };
+  });
+  return { rows, sourceSpreadsheetId:sourceId, sourceTab:CHARGEBEE_BRANCH_TAX_ID_TAB };
+}
+
+function appendBranchTaxIdReferenceRows_(sheet, references, batchId) {
+  const byBranch = {};
+  references.forEach(reference => { byBranch[reference.branchId] = reference; });
+  appendCurrentBatchKeyRows_(sheet, 'Branch ID', Object.keys(byBranch), batchId, branchId => {
+    const reference = byBranch[branchId];
+    return {
+      'Branch ID':branchId,
+      'Tax ID':reference.taxId,
+      'Source Spreadsheet ID':reference.sourceSpreadsheetId,
+      'Source Tab':reference.sourceTab,
+      'Source Row':reference.sourceRow,
+      'Imported At':reference.importedAt,
+      'Source Rows':reference.sourceRows,
+      'Import Status':reference.status,
+      'Notes':reference.notes,
+      'Review Batch ID':batchId
+    };
+  });
 }
 
 function ensureSettings_(sheet, settings) {
@@ -1659,6 +1786,52 @@ function indexedReview_(sheet, keyHeader) {
     const id = auditText_(row[key]);
     if (!id || out[id]) return;
     out[id] = values[0].reduce((o, h, i) => (o[String(h)] = row[i], o), {});
+  });
+  return out;
+}
+
+function indexedCurrentBatchReview_(sheet, keyHeader, relevantIds, activeBatchId) {
+  const currentBatchId = auditText_(activeBatchId);
+  if (!currentBatchId) {
+    const legacy = indexedReview_(sheet, keyHeader);
+    return Object.keys(legacy).reduce((out, id) => {
+      out[id] = { review:legacy[id], targetRowNumber:null, reviewBatchId:'', legacyMode:true };
+      return out;
+    }, {});
+  }
+  const values = sheet.getDataRange().getValues();
+  const headers = values[0].map(String);
+  const plan = headerNameMigrationPlan_(headers, [keyHeader, 'Review Batch ID'], sheet.getName());
+  if (plan.missing.length) throw new Error(sheet.getName() + ' current-batch index missing headers: ' + plan.missing.join(', '));
+  const relevant = new Set((relevantIds || []).map(auditText_).filter(Boolean));
+  const matches = {};
+  values.slice(1).forEach((row, index) => {
+    if (auditText_(row[plan.positions['Review Batch ID']]) !== currentBatchId) return;
+    const id = auditText_(row[plan.positions[keyHeader]]);
+    if (!id || relevant.size && !relevant.has(id)) return;
+    (matches[id] || (matches[id] = [])).push({
+      rowNumber:index + 2,
+      review:headers.reduce((out, header, column) => (out[header] = row[column], out), {})
+    });
+  });
+  const out = {};
+  relevant.forEach(id => {
+    const entries = matches[id] || [];
+    if (entries.length !== 1) {
+      out[id] = {
+        review:{}, targetRowNumber:null, reviewBatchId:currentBatchId,
+        identityError:entries.length
+          ? 'current batch 有重複 rows：' + entries.map(entry => entry.rowNumber).join(', ')
+          : 'current batch 缺少 row'
+      };
+      return;
+    }
+    out[id] = {
+      review:entries[0].review,
+      targetRowNumber:entries[0].rowNumber,
+      reviewBatchId:currentBatchId,
+      legacyMode:false
+    };
   });
   return out;
 }
@@ -3672,154 +3845,295 @@ function unresolvedApprovalStatus_(review) {
     : status;
 }
 
-/**
- * Re-reads the exact Renewal DB rows referenced by Queue and validates each
- * Share Plan as one group.  A shared overage price is valid only when:
- * 1) every Renewal DB member of the same Share Plan uses the group maximum,
- * 2) every member included in the current Queue has an exact Renewal DB row,
- * 3) Queue uses that same value for every included member, and
- * 4) the manually reviewed contract group confirms its complete membership.
- *
- * When this gate passes, a historical per-branch overage difference is a
- * policy normalization, not a plan change.  Contract consistency is confirmed
- * separately by Contract Evidence Review and Share Group Review.
- */
-function shareOverageSourceAudit_(ss, control, byBranch, qx) {
-  const result = { byBranch: {}, byGroup: {} };
-  const queueMembers = [];
+function queueSharePlanIds_(byBranch, qx) {
+  const ids = [];
   Object.keys(byBranch).forEach(branchId => {
-    byBranch[branchId].forEach(r => {
-      const product = auditText_(auditGet_(r.values, qx, '產品', true));
-      const shareId = auditText_(auditGet_(r.values, qx, 'Share Plan ID'));
+    byBranch[branchId].forEach(row => {
+      if (!isMainProduct_(auditText_(auditGet_(row.values, qx, '產品', true)))) return;
+      const shareId = auditText_(auditGet_(row.values, qx, 'Share Plan ID'));
+      if (shareId) ids.push(shareId);
+    });
+  });
+  return [...new Set(ids)].sort();
+}
+
+function queueShareOverageAudit_(byBranch, qx) {
+  const byBranchResult = {};
+  const groups = {};
+  Object.keys(byBranch).forEach(branchId => {
+    byBranch[branchId].forEach(row => {
+      const product = auditText_(auditGet_(row.values, qx, '產品', true));
+      const shareId = auditText_(auditGet_(row.values, qx, 'Share Plan ID'));
       if (!isMainProduct_(product) || !shareId) return;
-      const marker = auditText_(auditGet_(r.values, qx, 'Renewal DB Row'));
-      const match = marker.match(/^(.+)!(\d+)$/);
-      queueMembers.push({
+      (groups[shareId] || (groups[shareId] = [])).push({
         branchId,
-        shareId,
-        queuePrice: auditNumber_(auditGet_(r.values, qx, '超額每組單價', true)),
-        tabName: match ? match[1] : '',
-        sourceRow: match ? Number(match[2]) : null
+        price:auditNumber_(auditGet_(row.values, qx, '超額每組單價', true))
       });
     });
   });
-  if (!queueMembers.length) return result;
+  const byGroup = {};
+  Object.keys(groups).forEach(shareId => {
+    const members = groups[shareId];
+    const first = members[0] && members[0].price;
+    const pass = first !== null && members.every(member => numbersEqual_(member.price, first));
+    const audit = pass
+      ? { result:'Pass', highest:first, reason:'本批 Queue Share Plan「' + shareId + '」超額單價一致：' + auditFormatNumber_(first) }
+      : { result:'Need Check', reason:'本批 Queue Share Plan「' + shareId + '」超額單價缺失或不一致' };
+    byGroup[shareId] = audit;
+    members.forEach(member => { byBranchResult[member.branchId] = audit; });
+  });
+  return { byBranch:byBranchResult, byGroup };
+}
 
-  const maps = readTable_(ss.getSheetByName('Field Mapping'))
-    .filter(r => r['Source'] === 'Renewal DB' && isActive_(r['Active']));
-  const renewalSs = SpreadsheetApp.openById(control['Renewal DB Spreadsheet ID']);
-  const byTab = groupBy_(queueMembers, r => r.tabName);
-
-  Object.keys(byTab).forEach(tabName => {
-    const tabMembers = byTab[tabName];
-    if (!tabName) {
-      tabMembers.forEach(m => {
-        result.byBranch[m.branchId] = {
-          result: 'Need Check',
-          reason: 'Queue 缺少 Renewal DB Row，無法確認 Share Plan 組內最高超額單價'
-        };
-      });
-      return;
-    }
-    const renewal = renewalSs.getSheetByName(tabName);
-    if (!renewal) {
-      tabMembers.forEach(m => {
-        result.byBranch[m.branchId] = {
-          result: 'Need Check',
-          reason: '找不到 Renewal DB 分頁「' + tabName + '」，無法確認 Share Plan 組內最高超額單價'
-        };
-      });
-      return;
-    }
-
-    const values = renewal.getDataRange().getValues();
-    const mapping = resolveMappings_(maps, expandGroups_(values[0]), values[1].map(String));
-    const branchColumn = requiredMapping_(mapping, 'branch_id');
-    const shareColumn = requiredMapping_(mapping, 'new_share');
-    const overageColumn = requiredMapping_(mapping, 'new_overage_price');
-    const wantedShares = new Set(tabMembers.map(m => m.shareId));
-    const sourceGroups = {};
-
-    values.slice(2).forEach((row, i) => {
-      const shareId = auditText_(row[shareColumn]);
-      if (!shareId || !wantedShares.has(shareId)) return;
-      const groupKey = tabName + '¦' + shareId;
-      (sourceGroups[groupKey] || (sourceGroups[groupKey] = [])).push({
-        branchId: auditText_(row[branchColumn]),
-        shareId,
-        sourceRow: i + 3,
-        sourcePrice: auditNumber_(row[overageColumn])
-      });
+function structuredShareGroupAudits_(byBranch, qx, evidence, taxReferences, shareReviews, activeBatchId) {
+  const currentBatchId = auditText_(activeBatchId);
+  const groups = {};
+  Object.keys(byBranch).forEach(branchId => {
+    byBranch[branchId].forEach(row => {
+      if (!isMainProduct_(auditText_(auditGet_(row.values, qx, '產品', true)))) return;
+      const shareId = auditText_(auditGet_(row.values, qx, 'Share Plan ID'));
+      if (!shareId) return;
+      const member = {
+        branchId,
+        restaurant:auditText_(auditGet_(row.values, qx, '餐廳名稱', true)),
+        queueOverage:auditNumber_(auditGet_(row.values, qx, '超額每組單價', true))
+      };
+      (groups[shareId] || (groups[shareId] = [])).push(member);
     });
+  });
+  const byGroup = {};
+  Object.keys(groups).forEach(shareId => {
+    const members = groups[shareId];
+    const reviewEntry = shareReviews[shareId] || {
+      review:{}, targetRowNumber:null, reviewBatchId:currentBatchId,
+      identityError:'current batch 缺少 row'
+    };
+    if (!currentBatchId) {
+      const review = reviewEntry.review || {};
+      const pass = isPass_(review['Member Check']) && isPass_(review['Tax ID Check']) &&
+        isPass_(review['Contract Check']) && isPass_(review['Overage Check']) && isPass_(review['Status']);
+      byGroup[shareId] = {
+        result:pass ? 'Pass' : 'Need Check',
+        reason:pass ? 'Legacy Share Group Review 已人工確認。' : 'Legacy Share Group Review 尚未完成人工確認。',
+        trace:null
+      };
+      return;
+    }
+    const audit = structuredShareGroupAudit_(
+      shareId, members, evidence, taxReferences, reviewEntry, currentBatchId
+    );
+    byGroup[shareId] = audit;
+  });
+  return { byGroup };
+}
 
-    wantedShares.forEach(shareId => {
-      const groupKey = tabName + '¦' + shareId;
-      const queueGroup = tabMembers.filter(m => m.shareId === shareId);
-      const sourceGroup = sourceGroups[groupKey] || [];
-      const sourcePrices = sourceGroup.map(m => m.sourcePrice).filter(v => v !== null);
-      const highest = sourcePrices.length ? Math.max.apply(null, sourcePrices) : null;
-      const sourceUniform = highest !== null && sourceGroup.length > 0 &&
-        sourceGroup.every(m => numbersEqual_(m.sourcePrice, highest));
-      const queueUniform = highest !== null &&
-        queueGroup.every(m => numbersEqual_(m.queuePrice, highest));
-      const exactRows = queueGroup.every(m => sourceGroup.some(s =>
-        s.branchId === m.branchId && s.sourceRow === m.sourceRow &&
-        numbersEqual_(s.sourcePrice, m.queuePrice)
-      ));
+function structuredShareGroupAudit_(shareId, queueMembers, evidence, taxReferences, reviewEntry, batchId) {
+  const reasons = [];
+  if (reviewEntry.identityError) reasons.push('Share Group Review ' + reviewEntry.identityError);
+  const queueIds = [...new Set(queueMembers.map(member => member.branchId))].sort();
+  const manifestByIdentity = {};
+  const manifestSignatures = {};
+  const shareIdErrors = [];
+  let confirmedShareIdMismatch = false;
+  const overageErrors = [];
+  let confirmedOverageMismatch = false;
 
-      let audit;
-      if (!sourceGroup.length || highest === null) {
-        audit = {
-          result: 'Need Check',
-          reason: 'Renewal DB 找不到 Share Plan「' + shareId + '」的完整成員或超額單價'
-        };
-      } else if (!sourceUniform) {
-        audit = {
-          result: 'Need Check',
-          reason: 'Share Plan「' + shareId + '」的 Renewal DB 成員未全部使用組內最高超額單價 ' +
-            auditFormatNumber_(highest)
-        };
-      } else if (!queueUniform || !exactRows) {
-        audit = {
-          result: 'Need Check',
-          reason: 'Share Plan「' + shareId + '」本批 Queue 成員未與各自 Renewal DB 列統一使用最高超額單價 ' +
-            auditFormatNumber_(highest)
-        };
-      } else {
-        audit = {
-          result: 'Pass',
-          highest,
-          reason: 'Share Plan「' + shareId + '」Renewal DB 與本批 Queue 成員均使用組內最高超額單價 ' +
-            auditFormatNumber_(highest)
-        };
+  queueMembers.forEach(member => {
+    const evidenceEntry = evidence[member.branchId];
+    if (!evidenceEntry || evidenceEntry.identityError) {
+      shareIdErrors.push('Queue Branch ' + member.branchId + ' 缺少唯一 current-batch structured evidence row');
+      overageErrors.push('Queue Branch ' + member.branchId + ' 缺少 structured overage evidence');
+      return;
+    }
+    const parsed = parseStructuredContractData_(evidenceEntry.review || {});
+    if (parsed.result !== 'OK') {
+      shareIdErrors.push('Queue Branch ' + member.branchId + ' structured evidence 無法使用：' + parsed.reason);
+      overageErrors.push('Queue Branch ' + member.branchId + ' structured overage 無法使用');
+      return;
+    }
+    const manifests = Array.isArray(parsed.data.share_coverage_manifests)
+      ? parsed.data.share_coverage_manifests : [];
+    manifests.forEach((manifest, index) => {
+      const sourceId = auditText_(manifest && manifest.source_id);
+      const manifestId = auditText_(manifest && manifest.manifest_id) || sourceId + '¦' + index;
+      if (!sourceId || parsed.data.evidence_set.relevant_source_ids.indexOf(sourceId) < 0) {
+        shareIdErrors.push('Share coverage manifest ' + manifestId + ' 缺少 relevant source provenance');
+        return;
       }
-      result.byGroup[groupKey] = audit;
-      queueGroup.forEach(m => { result.byBranch[m.branchId] = audit; });
+      const signature = JSON.stringify(manifest);
+      if (manifestSignatures[manifestId] && manifestSignatures[manifestId] !== signature) {
+        shareIdErrors.push('Share coverage manifest ' + manifestId + ' 在不同 Branch projection 內容不一致');
+        return;
+      }
+      manifestSignatures[manifestId] = signature;
+      if (!manifestByIdentity[manifestId]) manifestByIdentity[manifestId] = manifest;
+    });
+
+    const matchingProducts = parsed.data.products.filter(product => {
+      if (!product || typeof product !== 'object' || Array.isArray(product)) return false;
+      const productField = product.product;
+      const productShare = product.share_plan_id;
+      return productField && structuredState_(productField.state) === 'confirmed' &&
+        isMainProduct_(canonicalDocumentProduct_(productField.value)) &&
+        productShare && structuredState_(productShare.state) === 'confirmed' &&
+        auditText_(productShare.value) === shareId;
+    });
+    if (!matchingProducts.length) {
+      overageErrors.push('Queue Branch ' + member.branchId + ' 找不到 Share ID ' + shareId + ' 的 structured main-product overage');
+      return;
+    }
+    const overages = matchingProducts.map(product => {
+      const field = product.overage_unit_price;
+      if (!field || structuredState_(field.state) !== 'confirmed') return null;
+      return auditNumber_(field.value);
+    }).filter(value => value !== null);
+    if (overages.length !== 1 || member.queueOverage === null || !numbersEqual_(overages[0], member.queueOverage)) {
+      if (overages.length === 1 && member.queueOverage !== null) confirmedOverageMismatch = true;
+      overageErrors.push('Queue Branch ' + member.branchId + ' 超額單價：文件 ' +
+        (overages.length === 1 ? auditFormatNumber_(overages[0]) : '無法唯一確認') +
+        '、Queue ' + auditFormatNumber_(member.queueOverage));
+    }
+  });
+
+  const covered = {};
+  Object.keys(manifestByIdentity).forEach(manifestId => {
+    const manifest = manifestByIdentity[manifestId];
+    const shareField = manifest && manifest.share_plan_id;
+    const shareState = structuredState_(shareField && shareField.state);
+    if (shareState !== 'confirmed') {
+      shareIdErrors.push('Share coverage manifest ' + manifestId + ' 的 Share Plan ID 為 ' +
+        displayStructuredState_(shareField && shareField.state));
+      return;
+    }
+    if (auditText_(shareField.value) !== shareId) {
+      confirmedShareIdMismatch = true;
+      shareIdErrors.push('Document Share ID「' + auditText_(shareField.value) + '」與 Queue「' + shareId + '」不一致');
+      return;
+    }
+    const complete = manifest.coverage_complete;
+    if (!complete || structuredState_(complete.state) !== 'confirmed' || complete.value !== true) {
+      shareIdErrors.push('Share coverage manifest ' + manifestId + ' 未確認完整 member set');
+      return;
+    }
+    if (!Array.isArray(manifest.covered_members)) {
+      shareIdErrors.push('Share coverage manifest ' + manifestId + ' 缺少 covered_members');
+      return;
+    }
+    const provenance = manifest.provenance;
+    if (!provenance || auditText_(provenance.source_id) !== auditText_(manifest.source_id) ||
+        !auditText_(provenance.locator || provenance.location)) {
+      shareIdErrors.push('Share coverage manifest ' + manifestId + ' 缺少 source／locator provenance');
+      return;
+    }
+    manifest.covered_members.forEach((coveredMember, index) => {
+      const branchField = coveredMember && coveredMember.branch_id;
+      const restaurantField = coveredMember && coveredMember.restaurant_name;
+      if (!restaurantField || structuredState_(restaurantField.state) !== 'confirmed' ||
+          !auditText_(restaurantField.value)) {
+        shareIdErrors.push('Share coverage manifest ' + manifestId + ' member[' + index +
+          '] restaurant name 無法確認');
+        return;
+      }
+      if (!branchField || structuredState_(branchField.state) !== 'confirmed' || !auditText_(branchField.value)) {
+        shareIdErrors.push('Share coverage manifest ' + manifestId + ' member[' + index +
+          '] Branch ID 無法由文件店名唯一 mapping');
+        return;
+      }
+      const mapping = coveredMember.mapping_provenance;
+      if (!mapping || !auditText_(mapping.source_id) || !auditText_(mapping.method)) {
+        shareIdErrors.push('Share coverage manifest ' + manifestId + ' member[' + index +
+          '] 缺少 Branch mapping provenance');
+        return;
+      }
+      const branchId = auditText_(branchField.value);
+      covered[branchId] = auditText_(restaurantField && restaurantField.value) || branchId;
     });
   });
-  return result;
+  if (!Object.keys(manifestByIdentity).length) shareIdErrors.push('current relevant evidence 未提供完整 share_coverage_manifests');
+
+  const coveredIds = Object.keys(covered).sort();
+  const documentExtra = coveredIds.filter(id => queueIds.indexOf(id) < 0);
+  const queueExtra = queueIds.filter(id => coveredIds.indexOf(id) < 0);
+  const coverageReasons = [];
+  documentExtra.forEach(id => coverageReasons.push('Document contains Branch ' + id + ' not present in current Queue.'));
+  queueExtra.forEach(id => coverageReasons.push('Queue Branch ' + id + ' is not covered by current Share evidence.'));
+  const memberStatus = shareIdErrors.length || coverageReasons.length ? 'NEEDS_REVIEW' : 'PASS';
+  const contractStatus = confirmedShareIdMismatch ? 'FAIL'
+    : shareIdErrors.length || coverageReasons.length ? 'NEEDS_REVIEW' : 'PASS';
+  reasons.push.apply(reasons, shareIdErrors.concat(coverageReasons));
+
+  const taxValues = [];
+  const taxErrors = [];
+  queueIds.forEach(branchId => {
+    const entry = taxReferences[branchId];
+    const review = entry && entry.review || {};
+    if (!entry || entry.identityError || auditText_(review['Import Status']).toUpperCase() !== 'PASS' ||
+        !normalizeTaxId_(review['Tax ID'])) {
+      taxErrors.push('Queue Branch ' + branchId + ' Tax ID snapshot 缺失、空白或有衝突');
+      return;
+    }
+    taxValues.push(normalizeTaxId_(review['Tax ID']));
+  });
+  const uniqueTaxIds = [...new Set(taxValues)];
+  let taxStatus;
+  if (taxErrors.length) taxStatus = 'NEEDS_REVIEW';
+  else if (uniqueTaxIds.length === 1) taxStatus = 'PASS';
+  else if (hasExplicitShareTaxApproval_(reviewEntry.review || {})) taxStatus = 'PASS';
+  else taxStatus = 'MANUAL REVIEW';
+  if (taxErrors.length) reasons.push.apply(reasons, taxErrors);
+  else if (uniqueTaxIds.length > 1 && taxStatus !== 'PASS') reasons.push('Share Plan current Queue members 的 Tax ID 不一致，需人工確認跨統編例外：' + uniqueTaxIds.join(', '));
+
+  const overageStatus = confirmedOverageMismatch ? 'FAIL' : overageErrors.length ? 'NEEDS_REVIEW' : 'PASS';
+  reasons.push.apply(reasons, overageErrors);
+  const statuses = [memberStatus, taxStatus, contractStatus, overageStatus];
+  const status = statuses.indexOf('FAIL') >= 0 ? 'FAIL'
+    : statuses.indexOf('NEEDS_REVIEW') >= 0 ? 'NEEDS_REVIEW'
+    : statuses.indexOf('MANUAL REVIEW') >= 0 ? 'MANUAL REVIEW' : 'PASS';
+  const reason = status === 'PASS'
+    ? 'Share Plan「' + shareId + '」current Queue coverage、文件 Share ID、Tax ID 與超額單價皆已確認。'
+    : [...new Set(reasons)].join('；');
+  return {
+    result:status === 'PASS' ? 'Pass' : 'Need Check',
+    reason,
+    trace:{
+      sharePlanId:shareId,
+      targetRowNumber:reviewEntry.targetRowNumber,
+      reviewBatchId:batchId,
+      expectedFields:{
+        'Member Check':memberStatus,
+        'Tax ID Check':taxStatus,
+        'Contract Check':contractStatus,
+        'Overage Check':overageStatus,
+        'Status':status,
+        'Automated Check Detail':reason
+      },
+      queueMemberIds:queueIds,
+      documentMemberIds:coveredIds,
+      manifestIds:Object.keys(manifestByIdentity).sort()
+    }
+  };
+}
+
+function hasExplicitShareTaxApproval_(review) {
+  return isPass_(review['Tax ID Check']) && !!auditText_(review['Reviewer']) &&
+    !!auditText_(review['Reviewed At']) && !!auditText_(review['Notes']);
 }
 
 function numbersEqual_(a, b) {
   return a !== null && b !== null && isFinite(a) && isFinite(b) && Math.abs(Number(a) - Number(b)) <= 0.000001;
 }
 
-function shareAudit_(rows, qx, reviews, sourceAudit) {
+function shareAudit_(rows, qx, groupAudits) {
   const shareIds = [...new Set(rows.map(r => auditText_(auditGet_(r.values, qx, 'Share Plan ID'))).filter(Boolean))];
   if (!shareIds.length) return { result: 'Not Applicable', reason: '' };
-  if (!sourceAudit || sourceAudit.result !== 'Pass') {
-    return {
-      result: 'Need Check',
-      reason: sourceAudit && sourceAudit.reason
-        ? sourceAudit.reason
-        : '尚未確認 Share Plan 所有成員、Renewal DB 與 Queue 均使用組內最高超額單價'
-    };
+  const audits = shareIds.map(id => groupAudits[id]).filter(Boolean);
+  if (audits.length !== shareIds.length) {
+    return { result:'Need Check', reason:'Share Plan current-batch deterministic audit 缺失；不得 fallback 到歷史人工 Pass' };
   }
-  const manual = shareIds.map(id => reviews[id] || {});
-  const approved = manual.every(r => isPass_(r['Member Check']) && isPass_(r['Tax ID Check']) && isPass_(r['Contract Check']) && isPass_(r['Overage Check']) && isPass_(r['Status']));
-  return approved
-    ? { result: 'Pass', reason: sourceAudit.reason }
-    : { result: 'Need Check', reason: 'Share Plan 已確認 Renewal DB／Queue 最高超額單價，但尚未確認完整成員、統編、合約期間與合約超額條件' };
+  const blockers = audits.filter(audit => audit.result !== 'Pass');
+  return blockers.length
+    ? { result:'Need Check', reason:blockers.map(audit => audit.reason).join('；') }
+    : { result:'Pass', reason:audits.map(audit => audit.reason).filter(Boolean).join('；') };
 }
 
 function pendingCatalogChangeAudit_(oldRows, queueRows, tx, qx, pendingChanges, branchId, planAudit) {
@@ -4019,6 +4333,64 @@ function writePlanClassificationTraces_(sheet, traces, activeBatchId) {
   }
   updates.forEach(update => {
     sheet.getRange(update.rowNumber, 1, 1, values[0].length).setValues([update.values]);
+  });
+}
+
+function writeShareGroupTraces_(sheet, traces, activeBatchId) {
+  const currentBatchId = auditText_(activeBatchId);
+  if (!sheet || !traces || !traces.length || !currentBatchId) return;
+  const values = sheet.getDataRange().getValues();
+  const outputHeaders = [
+    'Member Check', 'Tax ID Check', 'Contract Check', 'Overage Check',
+    'Status', 'Automated Check Detail'
+  ];
+  const requiredHeaders = ['Share Plan ID', 'Review Batch ID'].concat(outputHeaders);
+  const plan = headerNameMigrationPlan_(values[0].map(String), requiredHeaders, sheet.getName());
+  if (plan.missing.length) throw new Error(sheet.getName() + ' Share writer missing headers: ' + plan.missing.join(', '));
+  const preflightErrors = [];
+  const targetRows = {};
+  const targets = traces.map((trace, index) => {
+    const shareId = auditText_(trace && trace.sharePlanId);
+    const rowNumber = Number(trace && trace.targetRowNumber);
+    if (!shareId) preflightErrors.push('trace ' + (index + 1) + ' 缺少 Share Plan ID');
+    if (auditText_(trace && trace.reviewBatchId) !== currentBatchId) {
+      preflightErrors.push('Share Plan ' + shareId + ' trace batch 不等於 Active Batch');
+    }
+    if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > values.length) {
+      preflightErrors.push('Share Plan ' + shareId + ' targetRowNumber 無效');
+      return null;
+    }
+    if (targetRows[rowNumber]) preflightErrors.push('Share writer target row 重複：' + rowNumber);
+    targetRows[rowNumber] = shareId;
+    const row = values[rowNumber - 1];
+    if (auditText_(row[plan.positions['Share Plan ID']]) !== shareId) {
+      preflightErrors.push('row ' + rowNumber + ' Share Plan ID 已變更');
+    }
+    if (auditText_(row[plan.positions['Review Batch ID']]) !== currentBatchId) {
+      preflightErrors.push('row ' + rowNumber + ' Review Batch ID 已變更');
+    }
+    return { trace, shareId, rowNumber };
+  }).filter(Boolean);
+
+  targets.forEach(target => {
+    const currentRows = [];
+    values.slice(1).forEach((row, index) => {
+      if (auditText_(row[plan.positions['Share Plan ID']]) === target.shareId &&
+          auditText_(row[plan.positions['Review Batch ID']]) === currentBatchId) currentRows.push(index + 2);
+    });
+    if (currentRows.length !== 1 || currentRows[0] !== target.rowNumber) {
+      preflightErrors.push('Share Plan ' + target.shareId + ' current-batch row identity 已改變；目前 rows：' +
+        (currentRows.length ? currentRows.join(', ') : '無'));
+    }
+  });
+  if (preflightErrors.length) {
+    throw new Error(sheet.getName() + ' Share writer preflight failed: ' + preflightErrors.join('；'));
+  }
+  targets.forEach(target => {
+    outputHeaders.forEach(header => {
+      sheet.getRange(target.rowNumber, plan.positions[header] + 1)
+        .setValue(target.trace.expectedFields[header]);
+    });
   });
 }
 

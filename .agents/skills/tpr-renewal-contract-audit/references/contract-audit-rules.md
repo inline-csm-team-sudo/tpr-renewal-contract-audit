@@ -30,6 +30,7 @@
 | Renewal DB | `1tUOct-cJJY8854EAph9D0cxfiKz4qD1HFR2nXkPKWnc` / `{YYYYMM}` | 唯讀 |
 | RSV／RwG 方案參照表 | `10ECF2b0yu6loRZqDl_4ynHOuc2yz-IAUjPirCj-dxvM` / `TMS 方案` | 唯讀 |
 | Deposit 方案參照表 | `1QhNSdtg5TueFSoNBY8lFxXbtp_UktY1g8l7EUQWJ5kU` / `訂金方案` | 唯讀 |
+| Chargebee Import Master Sheets | `1TPp2_4wo_5VNBdMOLcnFzIA1X1EIhRv5sCMiFlLis6s` / `TW` | 永久唯讀；A=Branch ID、Q=Tax Reg Number (billing) |
 | 測試工作簿 | `1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4` | 可寫測試分頁 |
 | Apps Script | `1ideFb9UwKgQRheGCwInd7fxt5ZklqUrIK7EEbGnCOHOfHi06L1Ty3IfK` | 經使用者要求才修改 |
 
@@ -37,13 +38,13 @@
 
 Test 與 Production 共用同一套 business logic，但必須使用不同 Apps Script project 與 workbook。
 每個 project 以 Script Properties 明確設定 `ENVIRONMENT`、`TARGET_WORKBOOK_ID`、
-`EXPECTED_WORKBOOK_NAME` 及四個正式 source IDs；任何主要 entrypoint 在第一次 mutation 前都要驗證
+`EXPECTED_WORKBOOK_NAME` 及五個正式 source IDs；任何主要 entrypoint 在第一次 mutation 前都要驗證
 project environment、workbook ID／名稱、Test／Production sentinel 與 `Control` source IDs 完全一致，
 任一不符即 zero writes、fail closed。
 
 ### 1.2 寫入邊界
 
-- 可寫：`TPR Update Queue`、`Contract Evidence Review`、`Plan Classification Review`、`Special Approval Review`、`Share Group Review`、`Audit Log` 及明確的設定表。
+- 可寫：`TPR Update Queue`、`Contract Evidence Review`、`Plan Classification Review`、`Special Approval Review`、`Share Group Review`、`Branch Tax ID Reference`、`Audit Log` 及明確的設定表。
 - `Build Queue` 與 `Run Contract Audit` 對正式 TPR、Renewal DB 及所有方案參照表一律唯讀；每次仍須讀取最新 `TMS 方案` 以偵測 Catalog 的新增、修改與刪除。
 - 官方 RSV／RwG 方案表唯一可寫欄位是經使用者另行授權後，由明確的 `maintainPlanCodes()` maintenance action 補入空白的永久 `Plan Code` cell。Maintenance 不得重寫既有代碼或方案數值；一般 Build／Audit path 不具來源寫入權。
 - `Check=TRUE` 只代表測試 Queue 通過，不代表已獲授權寫回正式 TPR。
@@ -303,13 +304,40 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 
 ## 11. Share Plan
 
-- 依續約後 Share Plan ID 組成群組。
-- 共享超額單價使用群組所有方案中的最高值。
-- 因「組內取最高值」造成超額單價變動，不視為特殊方案變更。
-- 仍須確認所有成員、Renewal DB、Queue 與合約都使用相同最高單價。
-- 檢查完整成員、統編、期間、方案與超額條件。
+- Share Contract Audit runtime authority 固定為 current Queue、current-batch Structured Contract Data、
+  current-batch `Branch Tax ID Reference` 與 structured-document overage。Renewal DB 完整 Share member set
+  只服務 Queue conversion；不得用來判斷本批是否漏續約或作 Final Share gate。
+- 依 current Queue 的續約後 Share Plan ID 組群。同一份 evidence 的 coverage manifest 只計一次；同一
+  Share ID 可拆成多份合約，取所有 current relevant evidence coverage 的 union。
+- Document Share ID 必須與 Queue Share ID 一致。Confirmed mismatch 是不通過；Unreadable／Ambiguous／
+  缺值為 `NEEDS_REVIEW`。
+- `union(document-covered Branch IDs)` 與 current Queue member set exact match 才通過。文件多出的 Branch
+  回報 `Document contains Branch X not present in current Queue.`；Queue 多出的 Branch 回報
+  `Queue Branch X is not covered by current Share evidence.`。兩者均為 `NEEDS_REVIEW`，不推論漏續約。
+- 文件可以只列店名而不列 Branch ID；只有店名能經 authoritative Branch mapping 唯一對應時才可使用。
+  無法唯一 mapping 時 fail closed，不猜 Branch ID。
+- `Branch Tax ID Reference` 在 Review Batch preparation 時從唯讀 Chargebee Import Master Sheets `TW`
+  （A=Branch ID、Q=Tax Reg Number）按 current Queue Branch IDs 建立。Tax ID 以 string 保存、trim 外圍空白、
+  保留 leading zero。Final Audit 只讀 snapshot，不重開 Chargebee，也不 fallback Renewal DB。
+- Chargebee 找不到 Branch、Tax ID 空白或 duplicate Branch 的 normalized Tax ID 衝突時，Tax ID Check 為
+  `NEEDS_REVIEW`。duplicate rows 的 Tax ID 完全一致時可保留一筆，但 trace 必須列出所有 source rows。
+- 同 Share ID 的 current Queue members 若 normalized Tax ID 全部一致，自動 `PASS`；不同則
+  `MANUAL REVIEW`，不得自動 Pass 或 Auto Fail。人工例外只有在 Tax ID Check 明確 Pass 且 Reviewer、
+  Reviewed At、Notes 齊全時才成立，不得硬編碼特定 Share ID／餐廳。
+- Overage Check 逐 Branch 比較 Queue 與其 Structured Contract Data 的 Share main-product overage；一致
+  自動 Pass，不再要求人工重填。Branch-level plan／price／bonus／annual payment／Deposit mismatch 由原本
+  Document Match／Contract gate 負責，不得污染同 Share ID 其他 Branch 的 Share Check。
+- Share Contract Check 只負責 Share ID correctness 與 document coverage completeness，不重複 Branch-level
+  合約方案檢查。
+- Share Status 由 Member/Coverage、Tax ID、Contract、Overage 派生；四項全 Pass 才 Pass。有未解 input
+  即 `NEEDS_REVIEW`，跨統編例外為 `MANUAL REVIEW`。不再要求人工另填第五個 Status Pass；Reviewer／
+  Reviewed At 只用於真實人工例外。
 - Share Plan ID 由有值變成空白，需人工確認共享關係是否確實解除。
 - 同一份群組合約可覆蓋多個 Branch，但各 Branch 可依自身問題分別通過或不通過；不要因一店失敗而自動讓所有店失敗。
+- Active Batch mode 下，`Share Group Review` 與 `Branch Tax ID Reference` 都使用
+  `key + Review Batch ID` identity。每個 current Queue Share ID／Branch 必須恰好一列；historical rows
+  不參與 current decision。Share writer 真正寫入前重新讀最新 snapshot，確認 Share ID、Batch、唯一 row
+  與 target row number；任一衝突即全批 zero writes。
 
 ## 12. 異常阻擋
 
@@ -336,7 +364,8 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 | Contract Evidence Review | 證據類型、名稱／期間、客戶同意、指定信箱、雙方用印、付款週期、文件日期、Deposit 費率、文件年繳總額及其逐字原文／位置、Structured Review Version、provider-neutral Structured Contract Data、由 Apps Script 計算的 Document Match Result／Detail、覆核者、日期、狀態、Notes |
 | Plan Classification Review | Legacy membership、選填首約日、預期家族、舊／新方案家族、舊／新 Plan Code、匹配規則、例外、覆核者、日期、Notes；明確 FALSE／Fail 為人工 veto |
 | Special Approval Review | 是否需要、核准狀態、佐證、覆核者、日期、Notes |
-| Share Group Review | 成員、統編、合約、超額單價、狀態、覆核者、日期、Notes |
+| Share Group Review | current-batch 成員 coverage、Tax ID、Share ID／coverage contract check、structured overage、derived status、automation detail；覆核者／日期／Notes 只供真正人工例外 |
+| Branch Tax ID Reference | current Queue Branch 的 Chargebee Tax ID 唯讀快照、source row trace、import status 與 Review Batch ID |
 
 只有合約連結而沒有覆核內容，不算完成。
 

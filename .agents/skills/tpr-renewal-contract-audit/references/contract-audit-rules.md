@@ -155,6 +155,9 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - Structured mode 完全不讀 `Full Plan Match` 作為 manual veto；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可以否決 Apps Script 計算出的 MATCH。blank、checkbox 預設的 boolean `false` 與其他 token 都不構成 veto。Structured data 不存在的 legacy review 才維持原本 `Full Plan Match` 行為。
 - `Contract Evidence Review` migration 必須依完整 header name 定位。既有 header reuse，缺少的新 header append 到最右側，舊版額外欄保留；不得刪除、重新排序或覆蓋。必要 header duplicate 或無法唯一 mapping 時必須在任何 Sheet write 前 fail closed。
 - Document Match writer 必須以 index 傳遞的實際 `targetRowNumber`、`Review Batch ID`、Version 與 JSON snapshot 寫入。Active Batch mode 下，真正寫入前須重新讀最新 Sheet snapshot，確認 target row 的 Branch ID／Batch ID 未變、它仍是該 Branch 在 current batch 的唯一 row、Version `1` 與 JSON 非空且都和 indexing snapshot 一致。任一 identity／內容改變或 current-batch duplicate 必須 zero writes 並 fail closed；其他 batch／blank-batch historical rows不得造成 conflict，也不得被寫入。Legacy mode 維持原本「唯一完整 structured row」writer preflight。
+- Structured Contract Data 中已確認的 Contract Evidence facts 必須由 Apps Script 依 header name 投影到同一個 current-batch review row；writer 使用與 Document Match 相同的 Branch／Batch／row identity 與 latest-snapshot preflight。只可寫明確受支援的 evidence 欄位，historical rows 不得更新；任一欄在 indexing 後被人工修改時整批 zero writes。
+- Contract Evidence population 必須完整：日期只取有效且有 source／locator 的 `Confirmed` facts；印章只有 `verification=visual`、source 與 locator 完整時可寫入；明確 Email 同意或指定達成合意確認必須有 quote、locator、語意 kind 與正確 sender；年繳金額必須同時寫 Amount、Evidence Quote、Evidence Location。`NotMentioned`／`Unreadable`／`Ambiguous` 或不完整 provenance 不得 coercion 成通過值。
+- Evidence facts 與既有 Contract gate 的映射為：confirmed start/end → `Contract Start Date`／`Contract End Date`；visually confirmed seals → `Inline Seal`／`Customer Seal`；explicit customer consent → `Customer Explicit Consent`；指定書面確認 → `Agreement Confirmation Text` + `Confirmation Sender`；合法 annual fact → 年繳 Amount／Quote／Location。這只是 evidence population adapter，不改變 `contractAudit_()`、Special、Share、Historical、Deposit、Long-term 或 Final Check policy。
 - `Plan Classification Review` 在 Active Batch mode 使用相同的 `Branch ID + Review Batch ID` identity：每個 Queue Branch 在 current batch 必須恰好一列，缺列或重複列均在 trace write 前 fail closed，其他／blank batch rows 一律是 historical。Plan trace 必須攜帶 indexing 取得的 `targetRowNumber`；writer 在任何 trace write 前重新讀最新 Sheet snapshot，確認 Branch、Batch、current-batch 唯一性與 row number 都未改變，任一不符即全批 zero writes。只有 Active Batch ID 空白時才保留 legacy first-matching-row read／write 行為。
 
 ## 6. 原方案續約與方案變更
@@ -191,13 +194,14 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 ### 7.1 主產品 annual
 
 - Queue 轉換後的正費用 add-on 原則上寫為 annual，年度金額為月費 × 12；這是原方案續約的單向正規化。
-- 從雙方用印合約或合格的完整 Email 串擷取文件明載的「年繳總額」。`Annual Payment Amount (NTD)` 必須是文件字面金額，並同時記錄 `Annual Payment Evidence Quote` 與 `Annual Payment Evidence Location`；不得由 Queue 加總回推。
+- 從雙方用印合約或合格的完整 Email 串擷取文件明載的「年繳總額」。若文件未以單一欄位列總額，但同一 Branch 的產品固定費在文件中均為 Confirmed，可依文件 product facts 推導年度總額。`Annual Payment Amount (NTD)` 必須同時具有 `Annual Payment Evidence Quote` 與 `Annual Payment Evidence Location`；衍生值必須保存計算式、每個 source product 的 product／billing／price、quote、locator 與 source ID。不得由 Queue 加總回推。
 - 文件年繳總額只與該 Branch 的 Queue 中 `付款週期=annual` 的固定方案合約價格加總比較。只正規化幣別文字、千分位與空白後做精確數值相等比較；不得容許 ±1 元或其他誤差。
 - Queue 的 monthly add-on 不納入年繳總額；其月費仍必須在完整方案覆核中與文件逐項精確相等。交易費、抽成、信用卡處理費、超額與用量變動費用不納入固定年繳總額。
 - RSV 年繳但任一正費用 add-on 續約後仍為 monthly 時，定義為 split-billing 例外。只有雙方用印合約可以支持，單純 Email 同意不足；Queue 必須保留該 add-on 為 monthly，文件年繳總額只包含 annual rows。
 - 文件年繳總額、原文、位置、Queue annual 金額或 split-billing 用印任一缺失，或文件總額與 Queue annual 合計不完全相等，整個 Branch `Check=FALSE`；Note 必須列出文件總額、Queue 年繳合計、各 annual 產品金額與下一步。程式不得自動改寫 Queue 價格或付款週期。
 - 價格為 0 的 Deposit／加購不影響年繳總額；例如 RSV 年費 12,000、Deposit 月費 0，總額 12,000 時可維持 Deposit annual。
 - 無正費用加購時，不得只因沒有填年繳總額而阻擋。
+- Shared contract 必須先建立各 Branch 的 document-based annual amount，再用文件 shared total 作 cross-check；不可把 group total 當作單店 Amount。JK 類兩店文件若逐店為 RSV 21,600 + Deposit 300 × 12，單店 Amount 為 25,200，shared 50,400 只供交叉驗證。
 
 ### 7.2 主產品 monthly
 

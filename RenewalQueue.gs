@@ -37,6 +37,12 @@ const EVIDENCE_REVIEW_HEADERS = [
   'Structured Review Version', 'Structured Contract Data',
   'Document Match Result', 'Document Match Detail'
 ];
+const STRUCTURED_EVIDENCE_POPULATION_HEADERS = [
+  'Evidence Type', 'Customer Explicit Consent', 'Agreement Confirmation Text',
+  'Confirmation Sender', 'Inline Seal', 'Customer Seal', 'Contract Start Date',
+  'Contract End Date', 'Annual Payment Amount (NTD)',
+  'Annual Payment Evidence Quote', 'Annual Payment Evidence Location'
+];
 const PLAN_REVIEW_HEADERS = [
   'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
   'Reviewer', 'Reviewed At', 'Notes',
@@ -644,7 +650,6 @@ function runContractAudit() {
     const approval = approvals[branchId] || {};
     const share = shareAudit_(queueRows, qx, shares, shareOverage);
     const renewalDataMissing = queueRows.some(r => auditText_(auditGet_(r.values, qx, 'Transformation Status')).indexOf('Need Renewal Data') === 0);
-    const billing = billingCycleAudit_(ev, queueRows, qx);
     let documentMatch = structuredDocumentMatchAudit_(ev, queueRows, qx);
     if (evidenceEntry && evidenceEntry.currentBatchMode && documentMatch.result === 'NO_STRUCTURED_DATA') {
       const reason = '目前 Active Contract Review Batch「' + evidenceEntry.reviewBatchId + '」row ' +
@@ -652,7 +657,11 @@ function runContractAudit() {
         'Structured Contract Data 缺失；不得 fallback 到 historical Full Plan Match';
       documentMatch = { result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason };
     }
-    const contractReview = structuredReviewForProtectedGates_(ev, documentMatch);
+    const evidencePopulation = structuredContractEvidencePopulation_(
+      documentMatch && documentMatch.structuredData
+    );
+    const contractReview = structuredReviewForProtectedGates_(ev, documentMatch, evidencePopulation);
+    const billing = billingCycleAudit_(contractReview, queueRows, qx);
     const contract = contractAudit_(contractReview, documentMatch, planChange, billing, queueRows, qx, control, comparison.reason);
     if (evidenceEntry && evidenceEntry.targetRowNumber !== null) {
       documentMatchTraces.push(Object.assign({}, documentMatch, {
@@ -660,7 +669,12 @@ function runContractAudit() {
         targetRowNumber:evidenceEntry.targetRowNumber,
         reviewBatchId:evidenceEntry.reviewBatchId,
         expectedStructuredReviewVersion:auditText_(ev['Structured Review Version']),
-        expectedStructuredContractData:auditText_(ev['Structured Contract Data'])
+        expectedStructuredContractData:auditText_(ev['Structured Contract Data']),
+        evidencePopulation:evidencePopulation.fields,
+        expectedEvidencePopulation:Object.keys(evidencePopulation.fields).reduce((out, header) => {
+          out[header] = ev[header];
+          return out;
+        }, {})
       }));
     }
     const bonus = bonusCountAudit_(queueRows, qx, bonusReference, control);
@@ -700,9 +714,9 @@ function runContractAudit() {
       auditSet_(output, qx, 'New Plan Family', planAudit.newFamily || (planChange ? 'Unknown' : 'Not required (original renewal)'));
       auditSet_(output, qx, 'Plan Compliance', planAudit.result);
       auditSet_(output, qx, 'Required Evidence', contract.required);
-      auditSet_(output, qx, 'Evidence Type', auditText_(ev['Evidence Type']));
-      auditSet_(output, qx, 'Inline Seal', auditText_(ev['Inline Seal']));
-      auditSet_(output, qx, 'Customer Seal', auditText_(ev['Customer Seal']));
+      auditSet_(output, qx, 'Evidence Type', auditText_(contractReview['Evidence Type']));
+      auditSet_(output, qx, 'Inline Seal', auditText_(contractReview['Inline Seal']));
+      auditSet_(output, qx, 'Customer Seal', auditText_(contractReview['Customer Seal']));
       auditSet_(output, qx, 'Contract Check', contract.result);
       auditSet_(output, qx, 'Special Approval Required', special.required);
       auditSet_(output, qx, 'Special Approval Status', special.status);
@@ -2502,13 +2516,214 @@ function displayStructuredValue_(value) {
 }
 
 /**
+ * Projects provider-neutral document facts into the existing Contract
+ * Evidence Review interface.  This adapter deliberately accepts no Queue
+ * rows: every populated value must be supported by the frozen document JSON.
+ */
+function structuredContractEvidencePopulation_(data) {
+  const result = { fields:{}, errors:[] };
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return result;
+  const evidence = data.contract_evidence;
+  if (evidence === undefined || evidence === null) return result;
+  if (typeof evidence !== 'object' || Array.isArray(evidence)) {
+    result.errors.push('contract_evidence 必須是 object');
+    return result;
+  }
+  const relevantSourceIds = data.evidence_set && Array.isArray(data.evidence_set.relevant_source_ids)
+    ? data.evidence_set.relevant_source_ids.map(auditText_).filter(Boolean)
+    : [];
+  const relevant = relevantSourceIds.reduce((out, id) => (out[id] = true, out), {});
+
+  function confirmedFact(field, label, options) {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) return null;
+    const state = structuredState_(field.state);
+    if (state !== 'confirmed') return null;
+    const sourceId = auditText_(field.source_id);
+    if (!sourceId || !relevant[sourceId]) {
+      result.errors.push(label + ' Confirmed 但 source_id 不在 relevant evidence set');
+      return null;
+    }
+    const locator = auditText_(field.locator || field.location);
+    if (options && options.locatorRequired && !locator) {
+      result.errors.push(label + ' Confirmed 但缺少 locator');
+      return null;
+    }
+    const quote = auditText_(field.quote);
+    if (options && options.quoteRequired && !quote) {
+      result.errors.push(label + ' Confirmed 但缺少 quote');
+      return null;
+    }
+    return { field, sourceId, locator, quote };
+  }
+
+  function confirmedBoolean(field, label, visualRequired) {
+    const fact = confirmedFact(field, label, { locatorRequired:true });
+    if (!fact) return null;
+    if (visualRequired && auditText_(field.verification).toLowerCase() !== 'visual') {
+      result.errors.push(label + ' 只有 visual verification 才能 Confirmed');
+      return null;
+    }
+    if (field.value !== true && field.value !== false) {
+      result.errors.push(label + ' Confirmed value 必須是 boolean');
+      return null;
+    }
+    return field.value;
+  }
+
+  const startFact = confirmedFact(evidence.contract_start_date, 'contract_start_date', {
+    locatorRequired:true
+  });
+  const endFact = confirmedFact(evidence.contract_end_date, 'contract_end_date', {
+    locatorRequired:true
+  });
+  if (startFact) {
+    const value = strictStructuredDateText_(startFact.field.value);
+    if (value) result.fields['Contract Start Date'] = value;
+    else result.errors.push('contract_start_date Confirmed 但不是有效日期');
+  }
+  if (endFact) {
+    const value = strictStructuredDateText_(endFact.field.value);
+    if (value) result.fields['Contract End Date'] = value;
+    else result.errors.push('contract_end_date Confirmed 但不是有效日期');
+  }
+
+  const inlineSeal = confirmedBoolean(evidence.inline_seal, 'inline_seal', true);
+  const customerSeal = confirmedBoolean(evidence.customer_seal, 'customer_seal', true);
+  if (inlineSeal !== null) result.fields['Inline Seal'] = inlineSeal;
+  if (customerSeal !== null) result.fields['Customer Seal'] = customerSeal;
+  if (inlineSeal !== null || customerSeal !== null) result.fields['Evidence Type'] = 'Contract';
+
+  const consent = evidence.consent_evidence || evidence.customer_explicit_consent;
+  const consentFact = confirmedFact(consent, 'consent_evidence', {
+    locatorRequired:true, quoteRequired:true
+  });
+  if (consentFact && consent.value === true) {
+    const kind = auditText_(consent.kind || consent.type).toLowerCase().replace(/[\s_-]+/g, '');
+    if (['explicitconsent', 'explicitemailconsent', 'customerexplicitconsent'].includes(kind)) {
+      result.fields['Customer Explicit Consent'] = true;
+      result.fields['Evidence Type'] = 'Email';
+    } else if (['agreementconfirmation', 'writtenagreementconfirmation'].includes(kind)) {
+      const sender = auditText_(consent.sender).toLowerCase();
+      if (sender === 'inline-csm-team@inline.tw') {
+        result.fields['Agreement Confirmation Text'] = true;
+        result.fields['Confirmation Sender'] = sender;
+        result.fields['Evidence Type'] = 'Email';
+      } else {
+        result.errors.push('agreement confirmation 的 sender 不是指定信箱');
+      }
+    } else {
+      result.errors.push('consent_evidence Confirmed 但 kind 無法唯一映射');
+    }
+  }
+
+  const annual = evidence.annual_payment_amount_ntd || evidence.annual_payment_amount;
+  const annualPopulation = structuredAnnualPaymentPopulation_(annual, relevant);
+  if (annualPopulation.error) result.errors.push(annualPopulation.error);
+  else if (annualPopulation.fields) Object.assign(result.fields, annualPopulation.fields);
+
+  return result;
+}
+
+function strictStructuredDateText_(value) {
+  const text = dateOnlyText_(value);
+  const match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return '';
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day ? text : '';
+}
+
+function structuredAnnualPaymentPopulation_(field, relevantSourceIds) {
+  if (!field || typeof field !== 'object' || Array.isArray(field) ||
+      structuredState_(field.state) !== 'confirmed') return {};
+  const amount = exactCurrencyAmount_(field.value);
+  if (amount === null) return { error:'annual_payment_amount_ntd Confirmed 但 value 不是有效金額' };
+  const quote = auditText_(field.quote);
+  const locator = auditText_(field.locator || field.location);
+  const sourceId = auditText_(field.source_id);
+  const derived = field.derived === true || !!field.derivation;
+
+  if (!derived) {
+    if (!sourceId || !relevantSourceIds[sourceId]) {
+      return { error:'annual_payment_amount_ntd Confirmed 但 source_id 不在 relevant evidence set' };
+    }
+    if (!quote || !locator) {
+      return { error:'annual_payment_amount_ntd Confirmed 時 quote／locator 不得遺漏' };
+    }
+    if (!evidenceQuoteContainsAmount_(quote, amount)) {
+      return { error:'annual_payment_amount_ntd quote 必須明確包含文件金額 ' + amount };
+    }
+    return { fields:{
+      'Annual Payment Amount (NTD)':amount,
+      'Annual Payment Evidence Quote':quote,
+      'Annual Payment Evidence Location':locator
+    } };
+  }
+
+  const derivation = field.derivation;
+  const facts = derivation && Array.isArray(derivation.source_product_facts)
+    ? derivation.source_product_facts : [];
+  const calculation = auditText_(derivation && derivation.calculation);
+  if (!facts.length || !calculation) {
+    return { error:'derived annual payment 必須保存 calculation 與 source_product_facts' };
+  }
+  let calculated = 0;
+  const locators = [];
+  for (let index = 0; index < facts.length; index++) {
+    const fact = facts[index];
+    const label = 'annual payment source_product_facts[' + index + ']';
+    if (!fact || typeof fact !== 'object' || Array.isArray(fact)) {
+      return { error:label + ' 必須是 object' };
+    }
+    const factSourceId = auditText_(fact.source_id);
+    const factQuote = auditText_(fact.quote);
+    const factLocator = auditText_(fact.locator || fact.location);
+    if (!factSourceId || !relevantSourceIds[factSourceId] || !factQuote || !factLocator) {
+      return { error:label + ' 缺少 relevant source_id、quote 或 locator' };
+    }
+    const product = fact.product;
+    const billing = fact.billing_period;
+    const price = fact.price;
+    if (!product || structuredState_(product.state) !== 'confirmed' ||
+        !billing || structuredState_(billing.state) !== 'confirmed' ||
+        !price || structuredState_(price.state) !== 'confirmed') {
+      return { error:label + ' 的 product／billing_period／price 必須全部 Confirmed' };
+    }
+    const priceValue = exactCurrencyAmount_(price.value);
+    const billingValue = auditText_(billing.value).toLowerCase();
+    if (priceValue === null || (billingValue !== 'annual' && billingValue !== 'monthly')) {
+      return { error:label + ' 的 price 或 billing_period 無法計算年度金額' };
+    }
+    calculated += billingValue === 'monthly' ? priceValue * 12 : priceValue;
+    locators.push(factLocator);
+  }
+  if (calculated !== amount) {
+    return { error:'derived annual payment 計算結果 ' + calculated + ' 與 value ' + amount + ' 不一致' };
+  }
+  const evidenceQuote = '文件產品費用推導：' + calculation;
+  if (!evidenceQuoteContainsAmount_(evidenceQuote, amount)) {
+    return { error:'derived annual payment calculation 必須明確包含計算後金額 ' + amount };
+  }
+  return { fields:{
+    'Annual Payment Amount (NTD)':amount,
+    'Annual Payment Evidence Quote':evidenceQuote,
+    'Annual Payment Evidence Location':[...new Set(locators)].join('；')
+  } };
+}
+
+/**
  * Preserve the existing Deposit-Commission gate by projecting structured
  * facts into its current review-field interface.  Its comparison policy and
  * tolerance remain untouched.
  */
-function structuredReviewForProtectedGates_(review, documentMatch) {
+function structuredReviewForProtectedGates_(review, documentMatch, evidencePopulation) {
   const out = Object.assign({}, review);
   if (!documentMatch || !documentMatch.structuredData) return out;
+  const population = evidencePopulation || structuredContractEvidencePopulation_(documentMatch.structuredData);
+  Object.assign(out, population.fields || {});
   const products = documentMatch.structuredData.products.filter(row => {
     if (!row || typeof row !== 'object') return false;
     const field = row.product;
@@ -2538,6 +2753,16 @@ function writeDocumentMatchTraces_(sheet, traces, activeBatchId) {
     'Branch ID', 'Structured Review Version', 'Structured Contract Data',
     'Document Match Result', 'Document Match Detail'
   ];
+  const populationHeaders = [...new Set(traces.reduce((out, trace) =>
+    out.concat(Object.keys(trace && trace.evidencePopulation || {})), []))];
+  const unsupportedPopulationHeaders = populationHeaders.filter(header =>
+    STRUCTURED_EVIDENCE_POPULATION_HEADERS.indexOf(header) < 0
+  );
+  if (unsupportedPopulationHeaders.length) {
+    throw new Error(sheet.getName() + ' Document Match writer received unsupported evidence population headers: ' +
+      unsupportedPopulationHeaders.join(', ') + '. Zero writes performed.');
+  }
+  requiredHeaders.push.apply(requiredHeaders, populationHeaders);
   if (currentBatchId) requiredHeaders.push('Review Batch ID');
   const plan = headerNameMigrationPlan_(values[0].map(String), requiredHeaders, sheet.getName());
   if (plan.missing.length) {
@@ -2602,10 +2827,20 @@ function writeDocumentMatchTraces_(sheet, traces, activeBatchId) {
     if (actualData !== expectedData) {
       preflightErrors.push('row ' + rowNumber + ' Structured Contract Data 與 indexing snapshot 不一致');
     }
+    const evidencePopulation = trace && trace.evidencePopulation || {};
+    const expectedPopulation = trace && trace.expectedEvidencePopulation || {};
+    Object.keys(evidencePopulation).forEach(header => {
+      const actual = auditText_(row[plan.positions[header]]);
+      const expected = auditText_(expectedPopulation[header]);
+      if (actual !== expected) {
+        preflightErrors.push('row ' + rowNumber + ' ' + header + ' 與 indexing snapshot 不一致');
+      }
+    });
     return {
       rowNumber,
       result:trace.result,
-      detail:trace.detail || trace.reason || ''
+      detail:trace.detail || trace.reason || '',
+      evidencePopulation
     };
   });
   Object.keys(targetBranches).forEach(branchId => {
@@ -2633,6 +2868,10 @@ function writeDocumentMatchTraces_(sheet, traces, activeBatchId) {
   updates.forEach(update => {
     sheet.getRange(update.rowNumber, resultColumn + 1, 1, 1).setValues([[update.result]]);
     sheet.getRange(update.rowNumber, detailColumn + 1, 1, 1).setValues([[update.detail]]);
+    Object.keys(update.evidencePopulation).forEach(header => {
+      sheet.getRange(update.rowNumber, plan.positions[header] + 1, 1, 1)
+        .setValues([[update.evidencePopulation[header]]]);
+    });
   });
 }
 

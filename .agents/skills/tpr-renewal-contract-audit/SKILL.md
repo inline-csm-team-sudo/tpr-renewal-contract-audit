@@ -46,11 +46,12 @@ When the user says「從頭跑一次續約流程」or equivalent:
    Evidence and one Plan Classification identity row before extraction starts.
 6. Open every contract, email, image, or folder linked by the selected branches and inventory the complete relevant evidence set for each Branch.
 7. For PDFs or photographs, inspect every relevant page visually; OCR or extracted text is only an aid.
-8. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.
-9. Complete Contract Evidence, Plan Classification, Special Approval, and Share Group reviews.
-10. Decide each Branch using all products together, then write the same decision to every Queue product row for that Branch.
-11. Write `Check=TRUE` only when every required check passes. Otherwise write `FALSE` and a concrete, one-line Note containing actual values and the required next action.
-12. Verify counts, ensure every unchecked row has a nonblank Note, append Audit Log, and visually inspect the Queue.
+8. Before freezing Structured Contract Data, complete the evidence checklist for every Branch: inspect every relevant signature/seal page (including page 2, the final page and relevant folder attachments), locate explicit consent or designated written agreement evidence, confirm the renewal period, and preserve annual-payment amount plus quote/location or a document-only derivation with provenance. Text extraction alone cannot close a visual seal/signature field; run the field-local visual fallback defined by `references/structured-extraction.md` whenever the field requires visual evidence.
+9. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.
+10. Complete Contract Evidence, Plan Classification, Special Approval, and Share Group reviews.
+11. Decide each Branch using all products together, then write the same decision to every Queue product row for that Branch.
+12. Write `Check=TRUE` only when every required check passes. Otherwise write `FALSE` and a concrete, one-line Note containing actual values and the required next action.
+13. Verify counts, ensure every unchecked row has a nonblank Note, append Audit Log, and visually inspect the Queue.
 
 Running the Apps Script audit alone is not a completed review. Codex must read the linked evidence, confirm the Branch's complete relevant evidence set, and fill the review facts before final Check decisions. Once structured mode is enabled, missing or invalid structured data is `NEEDS_REVIEW` and must never fall back to a legacy manual TRUE.
 
@@ -60,6 +61,7 @@ Running the Apps Script audit alone is not a completed review. Codex must read t
 - Use the signed-in Chrome session only when an interactive menu, Apps Script UI, or visible page state is required.
 - Use PDF rendering and page screenshots for scanned or image-only contracts.
 - Read an entire email thread and all relevant files in a linked folder, not only the first attachment.
+- Treat seal/signature pages, explicit consent, renewal dates and annual-payment provenance as mandatory evidence-completeness fields. OCR silence is not `NotMentioned`; inspect the relevant visual page or leave the field `Unreadable`/`Ambiguous`.
 - Structured extraction may use Gemini or another document reader, but its output must follow the provider-neutral schema. The reader reports document facts and field states only; it does not decide MATCH/MISMATCH.
 - Extraction safety is ordered `correct Confirmed` first, `Ambiguous` or `Unreadable` second, and guessed `Confirmed` last. A completed extraction has zero wrong-Confirmed fields; first-pass usability never justifies guessing.
 - Normal passing products do not require page, location, or raw text. Preserve a source locator for mismatches, unreadable or ambiguous fields, bonus values, annual totals, Deposit rates, consent, seals, special evidence, or other manual-review exceptions when available.

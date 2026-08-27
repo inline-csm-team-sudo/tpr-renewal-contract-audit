@@ -5,10 +5,11 @@ const vm = require('vm');
 const source = fs.readFileSync('RenewalQueue.gs', 'utf8') + `
 globalThis.__test = {
   headerIndex_, structuredDocumentMatchAudit_, structuredReviewForProtectedGates_,
+  structuredContractEvidencePopulation_, structuredAnnualPaymentPopulation_,
   contractAudit_, decideAuditStatus_, headerNameMigrationPlan_, missingEvidenceReviewRows_,
   ensureReviewSheetHeadersByName_, writeDocumentMatchTraces_, isExplicitStructuredPlanVeto_,
   indexedEvidenceReviews_, indexedPlanClassificationReviews_,
-  writePlanClassificationTraces_, normalizeStructuredDocumentProducts_,
+  writePlanClassificationTraces_, normalizeStructuredDocumentProducts_, billingCycleAudit_,
   evidenceReviewHeaders:EVIDENCE_REVIEW_HEADERS
 };`;
 const context = {
@@ -139,6 +140,179 @@ data = structuredData([product({ bonus_sets:field('Unreadable') })]);
 result = match(data);
 assert.strictEqual(result.result, 'NEEDS_REVIEW');
 assert.match(result.reason, /Unreadable/);
+
+// Contract-evidence extraction regressions are generic document fixtures;
+// production Branch IDs and Queue expected values never participate.
+function evidenceData(contractEvidence, sourceIds = ['FILE1']) {
+  return structuredData([product()], {
+    evidence_set:{ state:'Confirmed', complete:true, relevant_source_ids:sourceIds },
+    contract_evidence:contractEvidence
+  });
+}
+
+// 14 known dual-seal shapes: page 2, last page, and a relevant attachment's
+// last page all require visual confirmation before either seal becomes true.
+const dualSealLocations = [
+  'contract.pdf page 2 signature area', 'contract.pdf final page signature area',
+  'amendment.pdf page 2 seal block', 'relevant attachment final page',
+  'signed renewal.pdf page 3', 'scanned agreement final image',
+  'folder/renewal-contract.pdf final page', 'folder/addendum.pdf page 2',
+  'contract-part-2.pdf page 1', 'signed quotation final page',
+  'renewal letter page 2', 'image attachment 2 of 2',
+  'combined PDF final page', 'signature appendix final page'
+];
+dualSealLocations.forEach(locator => {
+  const population = api.structuredContractEvidencePopulation_(evidenceData({
+    inline_seal:{ state:'Confirmed', value:true, source_id:'FILE1', locator, verification:'visual' },
+    customer_seal:{ state:'Confirmed', value:true, source_id:'FILE1', locator, verification:'visual' }
+  }));
+  assert.strictEqual(population.fields['Inline Seal'], true, locator);
+  assert.strictEqual(population.fields['Customer Seal'], true, locator);
+  assert.strictEqual(population.fields['Evidence Type'], 'Contract', locator);
+  assert.strictEqual(population.errors.length, 0, locator);
+});
+
+// OCR blank or a text-only inference never confirms a visual seal.
+['NotMentioned', 'Unreadable', 'Ambiguous'].forEach(state => {
+  const population = api.structuredContractEvidencePopulation_(evidenceData({
+    inline_seal:{ state, source_id:'FILE1', locator:'final page', verification:'visual' },
+    customer_seal:{ state, source_id:'FILE1', locator:'final page', verification:'visual' }
+  }));
+  assert.strictEqual(population.fields['Inline Seal'], undefined);
+  assert.strictEqual(population.fields['Customer Seal'], undefined);
+});
+let population = api.structuredContractEvidencePopulation_(evidenceData({
+  inline_seal:{ state:'Confirmed', value:true, source_id:'FILE1', locator:'OCR text', verification:'text' }
+}));
+assert.strictEqual(population.fields['Inline Seal'], undefined);
+assert.match(population.errors.join('；'), /visual verification/);
+
+// 14 explicit consent/agreement-confirmation forms populate only when quote,
+// locator, source identity, and semantic kind are all explicit.
+const consentFixtures = Array.from({ length:14 }, (_, index) => index);
+consentFixtures.forEach(index => {
+  const agreement = index % 3 === 0;
+  const contractEvidence = {
+    consent_evidence:{
+      state:'Confirmed', value:true, source_id:'FILE1',
+      locator:'email thread message ' + (index + 1),
+      quote:agreement
+        ? '貴我雙方已就續約方案達成合意，特此以本信件進行書面確認。'
+        : '同意本次續約方案。',
+      kind:agreement ? 'agreement_confirmation' : 'explicit_email_consent'
+    }
+  };
+  if (agreement) contractEvidence.consent_evidence.sender = 'inline-csm-team@inline.tw';
+  const consentPopulation = api.structuredContractEvidencePopulation_(evidenceData(contractEvidence));
+  if (agreement) {
+    assert.strictEqual(consentPopulation.fields['Agreement Confirmation Text'], true);
+    assert.strictEqual(consentPopulation.fields['Confirmation Sender'], 'inline-csm-team@inline.tw');
+  } else {
+    assert.strictEqual(consentPopulation.fields['Customer Explicit Consent'], true);
+  }
+  assert.strictEqual(consentPopulation.fields['Evidence Type'], 'Email');
+  assert.strictEqual(consentPopulation.errors.length, 0);
+});
+
+// Vague conversation or incomplete provenance stays unpopulated.
+population = api.structuredContractEvidencePopulation_(evidenceData({
+  consent_evidence:{ state:'Ambiguous', source_id:'FILE1', locator:'email thread', quote:'看起來可以' }
+}));
+assert.strictEqual(population.fields['Customer Explicit Consent'], undefined);
+population = api.structuredContractEvidencePopulation_(evidenceData({
+  consent_evidence:{ state:'Confirmed', value:true, source_id:'FILE1', locator:'email thread',
+    quote:'收到', kind:'ambiguous_reply' }
+}));
+assert.strictEqual(population.fields['Customer Explicit Consent'], undefined);
+
+// A reliably readable scanned period is populated after field-local visual
+// fallback. Invalid or uncertain dates remain fail closed.
+population = api.structuredContractEvidencePopulation_(evidenceData({
+  contract_start_date:{ state:'Confirmed', value:'2026-09-01', source_id:'FILE1',
+    locator:'scan page 1 date block', verification:'visual' },
+  contract_end_date:{ state:'Confirmed', value:'2027-08-31', source_id:'FILE1',
+    locator:'scan page 1 date block', verification:'visual' }
+}));
+assert.strictEqual(population.fields['Contract Start Date'], '2026-09-01');
+assert.strictEqual(population.fields['Contract End Date'], '2027-08-31');
+population = api.structuredContractEvidencePopulation_(evidenceData({
+  contract_start_date:{ state:'Confirmed', value:'2026-02-31', source_id:'FILE1', locator:'scan page 1' }
+}));
+assert.strictEqual(population.fields['Contract Start Date'], undefined);
+['Unreadable', 'Ambiguous'].forEach(state => {
+  const periodPopulation = api.structuredContractEvidencePopulation_(evidenceData({
+    contract_start_date:{ state, source_id:'FILE1', locator:'scan page 1' }
+  }));
+  assert.strictEqual(periodPopulation.fields['Contract Start Date'], undefined);
+});
+
+function derivedAnnualEvidence(monthlyDeposit = 300, annualRsv = 21600) {
+  const total = annualRsv + monthlyDeposit * 12;
+  return {
+    state:'Confirmed', value:total, derived:true,
+    derivation:{
+      calculation:'RSV ' + annualRsv + ' + Deposit ' + monthlyDeposit + ' × 12 = ' + total,
+      source_product_facts:[
+        {
+          source_id:'FILE1', quote:'RSV 年費 ' + annualRsv, locator:'page 1 RSV row',
+          product:field('Confirmed', 'RSV'), billing_period:field('Confirmed', 'annual'),
+          price:field('Confirmed', annualRsv)
+        },
+        {
+          source_id:'FILE1', quote:'Deposit 月費 ' + monthlyDeposit, locator:'page 1 Deposit row',
+          product:field('Confirmed', 'Deposit'), billing_period:field('Confirmed', 'monthly'),
+          price:field('Confirmed', monthlyDeposit)
+        }
+      ],
+      shared_total_cross_check:{ state:'Confirmed', value:total * 2, source_id:'FILE1',
+        quote:'兩店合計 ' + total * 2, locator:'page 1 total' }
+    }
+  };
+}
+
+// 13 annual-payment population shapes all produce an amount plus complete
+// quote/location provenance. The shared total is only a cross-check.
+const annualFixtures = [
+  { state:'Confirmed', value:21600, source_id:'FILE1', quote:'年繳總額 21,600 元', locator:'page 2 payment' },
+  { state:'Confirmed', value:25200, source_id:'FILE1', quote:'年繳總額 25,200 元', locator:'page 1 total' },
+  derivedAnnualEvidence(), derivedAnnualEvidence(0), derivedAnnualEvidence(500),
+  derivedAnnualEvidence(800), derivedAnnualEvidence(1000), derivedAnnualEvidence(1500),
+  derivedAnnualEvidence(200), derivedAnnualEvidence(400), derivedAnnualEvidence(600),
+  derivedAnnualEvidence(1200), derivedAnnualEvidence(250)
+];
+annualFixtures.forEach((annualField, index) => {
+  const annualPopulation = api.structuredContractEvidencePopulation_(evidenceData({
+    annual_payment_amount_ntd:annualField
+  }));
+  assert.notStrictEqual(annualPopulation.fields['Annual Payment Amount (NTD)'], undefined,
+    'annual fixture ' + index);
+  assert.ok(annualPopulation.fields['Annual Payment Evidence Quote'], 'annual quote ' + index);
+  assert.ok(annualPopulation.fields['Annual Payment Evidence Location'], 'annual location ' + index);
+  assert.strictEqual(annualPopulation.errors.length, 0, 'annual fixture ' + index);
+});
+population = api.structuredContractEvidencePopulation_(evidenceData({
+  annual_payment_amount_ntd:derivedAnnualEvidence()
+}));
+assert.strictEqual(population.fields['Annual Payment Amount (NTD)'], 25200);
+assert.match(population.fields['Annual Payment Evidence Quote'], /21600.*300.*12.*25200/);
+assert.doesNotMatch(population.fields['Annual Payment Evidence Quote'], /50400/);
+
+// Confirmed annual values without provenance, Queue-derived hints, or a
+// shared group total alone cannot populate a Branch annual amount.
+[
+  { state:'Confirmed', value:25200, source_id:'FILE1' },
+  { state:'Confirmed', value:25200, source_id:'FILE1', quote:'Queue 預期 25,200', locator:'' },
+  { state:'Confirmed', value:50400, derived:true, source_id:'FILE1',
+    derivation:{ calculation:'shared total = 50400', source_product_facts:[] } },
+  { state:'Unreadable', source_id:'FILE1', locator:'page 1 total' },
+  { state:'Ambiguous', source_id:'FILE1', locator:'page 1 total' }
+].forEach(annualField => {
+  const annualPopulation = api.structuredContractEvidencePopulation_(evidenceData({
+    annual_payment_amount_ntd:annualField,
+    queue_expected_amount:25200
+  }));
+  assert.strictEqual(annualPopulation.fields['Annual Payment Amount (NTD)'], undefined);
+});
 
 // Case 4: extra document product.
 data = structuredData([product(), voiceProduct()]);
@@ -927,6 +1101,98 @@ assert.throws(
   /Structured Contract Data.*indexing snapshot/
 );
 assert.strictEqual(traceSheet.writes.length, 0);
+
+// Evidence population uses the same current-batch row identity and latest
+// snapshot preflight as Document Match Result/Detail.
+const populationTraceHeaders = traceHeaders.concat([
+  'Evidence Type', 'Customer Explicit Consent', 'Agreement Confirmation Text',
+  'Confirmation Sender', 'Inline Seal', 'Customer Seal', 'Contract Start Date',
+  'Contract End Date', 'Annual Payment Amount (NTD)',
+  'Annual Payment Evidence Quote', 'Annual Payment Evidence Location'
+]);
+function populationEvidenceSheet(rows) {
+  const values = [populationTraceHeaders].concat(rows.map(row => row.slice()));
+  const writes = [];
+  return {
+    values,
+    writes,
+    getName:() => 'Contract Evidence Review',
+    getDataRange:() => ({ getValues:() => values.map(row => row.slice()) }),
+    getRange:(row, column, rowCount, columnCount) => ({
+      setValues:newValues => {
+        writes.push({ row, column, rowCount, columnCount, values:newValues });
+        newValues.forEach((newRow, rowOffset) => newRow.forEach((value, columnOffset) => {
+          values[row - 1 + rowOffset][column - 1 + columnOffset] = value;
+        }));
+      }
+    })
+  };
+}
+function populationEvidenceRow(branchId, batchId) {
+  return evidenceRow(branchId, '1', '{"schema_version":1}', '', '', false, batchId)
+    .concat(Array(populationTraceHeaders.length - traceHeaders.length).fill(''));
+}
+let populationTraceSheet = populationEvidenceSheet([
+  populationEvidenceRow('B1', 'REVIEW-OLD'),
+  populationEvidenceRow('B1', activeBatchId)
+]);
+let populationIndex = api.indexedEvidenceReviews_(
+  populationTraceSheet, 'Branch ID', ['B1'], activeBatchId
+);
+const projectedFields = {
+  'Evidence Type':'Contract', 'Inline Seal':true, 'Customer Seal':true,
+  'Contract Start Date':'2026-09-01', 'Contract End Date':'2027-08-31',
+  'Annual Payment Amount (NTD)':25200,
+  'Annual Payment Evidence Quote':'文件產品費用推導：21600 + 300 × 12 = 25200',
+  'Annual Payment Evidence Location':'page 1 RSV row；page 1 Deposit row'
+};
+let populationTrace = traceFor(populationIndex.B1);
+populationTrace[0].evidencePopulation = projectedFields;
+populationTrace[0].expectedEvidencePopulation = Object.keys(projectedFields)
+  .reduce((out, header) => (out[header] = '', out), {});
+api.writeDocumentMatchTraces_(populationTraceSheet, populationTrace, activeBatchId);
+assert.deepStrictEqual(writtenRows(populationTraceSheet), [3]);
+Object.keys(projectedFields).forEach(header => {
+  const column = populationTraceHeaders.indexOf(header);
+  assert.strictEqual(populationTraceSheet.values[2][column], projectedFields[header]);
+  assert.strictEqual(populationTraceSheet.values[1][column], '');
+});
+
+// A concurrent human edit to any target population field causes zero writes.
+populationTraceSheet = populationEvidenceSheet([populationEvidenceRow('B1', activeBatchId)]);
+populationIndex = api.indexedEvidenceReviews_(populationTraceSheet, 'Branch ID', ['B1'], activeBatchId);
+populationTrace = traceFor(populationIndex.B1);
+populationTrace[0].evidencePopulation = { 'Inline Seal':true };
+populationTrace[0].expectedEvidencePopulation = { 'Inline Seal':'' };
+populationTraceSheet.values[1][populationTraceHeaders.indexOf('Inline Seal')] = 'manual edit';
+assert.throws(
+  () => api.writeDocumentMatchTraces_(populationTraceSheet, populationTrace, activeBatchId),
+  /Inline Seal.*indexing snapshot/
+);
+assert.strictEqual(populationTraceSheet.writes.length, 0);
+
+// Existing billing gate semantics consume the projected document-derived
+// Branch amount; the shared group total alone cannot satisfy the gate.
+const annualDepositQueue = [
+  queueRow({ product:'RSV', billing:'annual', price:21600 }),
+  queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:'', price:3600,
+    overageMethod:'B2C', overagePrice:0 })
+].map(values => ({ values }));
+const derivedPopulation = api.structuredContractEvidencePopulation_(evidenceData({
+  annual_payment_amount_ntd:derivedAnnualEvidence()
+}));
+assert.strictEqual(
+  api.billingCycleAudit_(derivedPopulation.fields, annualDepositQueue, qx).result,
+  'Pass'
+);
+const sharedOnlyPopulation = api.structuredContractEvidencePopulation_(evidenceData({
+  annual_payment_amount_ntd:{ state:'Confirmed', value:50400, derived:true,
+    derivation:{ calculation:'shared total = 50400', source_product_facts:[] } }
+}));
+assert.strictEqual(
+  api.billingCycleAudit_(sharedOnlyPopulation.fields, annualDepositQueue, qx).result,
+  'Need Review'
+);
 
 // Plan Classification trace identity is scoped to the Active Contract Review Batch.
 const planHeaders = [

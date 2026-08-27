@@ -149,9 +149,11 @@ RwG structured comparison／normalization 暫不屬本次自動化優化範圍�
 
 `Contract Evidence Review` migration 與所有 structured read／write 均依 header name 定位。已存在欄位 reuse，缺少欄位 append 到最右側，舊欄與舊 implementation 額外欄完整保留。新增 row 依 Sheet 實際欄寬建立，只填 Branch ID、Evidence URL、`Structured Review Version=1`。必要 header duplicate 或 mapping 無法唯一判定時，必須在任何 Sheet write 前停止。
 
+Structured evidence population 由 Apps Script 將 frozen JSON 的 confirmed facts 依 header name 投影到同一個 current-batch row，並沿用 Document Match 的 Active Batch／row-number／latest-snapshot zero-write preflight。每次 extraction 必須先檢查 relevant PDF／folder attachments 的第 2 頁、末頁與簽署頁、完整 Email 同意、renewal period 與 annual payment provenance；OCR 空白不能判定無用印，需要 visual fallback 的欄位不得只靠文字 extraction。這個 adapter 不改變 Contract、Special、Share、Historical、Deposit、Long-term 或 Final Check policy。
+
 正常通過的 product 不強制保存 page、location 或 raw text；只有 mismatch、ambiguous、unreadable、bonus、annual total、Deposit commission／buy-in、consent、dual seal、special evidence 或人工覆核例外需在可取得時保留 locator。完整產品 multiset 必須逐項與 Queue 比較，包含 duplicate、missing／extra product、週期、組數、贈送、價格、Share、超額及 Deposit 條件。
 
-當 RSV／RwG 主產品為 annual 且存在正費用 add-on 時，`Contract Evidence Review` 必須保存文件明載的年繳總額、逐字原文與文件／Email 位置；不得由 Queue 加總回推。文件年繳總額必須與該 Branch 的 Queue 全部 annual 固定方案價格加總完全相等；monthly add-on 另由完整方案覆核比對月費，不納入年繳總額。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額。比較不允許金額誤差。
+當 RSV／RwG 主產品為 annual 且存在正費用 add-on 時，`Contract Evidence Review` 必須保存文件年繳總額、支持原文與文件／Email 位置；不得由 Queue 加總回推。文件沒有單一總額欄時，可由同一 Branch 的 confirmed document product facts 推導，但必須保存計算式及每個 source product 的 product／billing／price／quote／locator／source ID。Shared contract 先建立逐 Branch amount，group total 只作 cross-check。文件年繳總額必須與該 Branch 的 Queue 全部 annual 固定方案價格加總完全相等；monthly add-on 另由完整方案覆核比對月費，不納入年繳總額。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額。比較不允許金額誤差。
 
 RSV annual 但正費用 add-on 續約後仍為 monthly 時，屬 split-billing 例外。Queue 必須保留 monthly 週期與月費，文件年繳總額只包含 annual rows，並必須有雙方用印合約；完整 Email 同意不足。程式僅可將不一致寫為 Branch 層級 `Check=FALSE` 與具體 Note，不得自動改寫 Queue 價格或週期。
 

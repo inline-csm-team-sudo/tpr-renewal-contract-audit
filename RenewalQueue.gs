@@ -44,6 +44,19 @@ const STRUCTURED_EVIDENCE_POPULATION_HEADERS = [
   'Contract End Date', 'Annual Payment Amount (NTD)',
   'Annual Payment Evidence Quote', 'Annual Payment Evidence Location'
 ];
+const STRUCTURED_ANNUAL_PAYMENT_HEADERS = [
+  'Annual Payment Amount (NTD)', 'Annual Payment Evidence Quote',
+  'Annual Payment Evidence Location'
+];
+const STRUCTURED_PRODUCT_COMPARISON_FIELDS = [
+  ['billing', '付款週期'], ['sets', '使用組數'], ['bonus', '贈送組數'], ['price', '價格'],
+  ['share', 'Share Plan ID'], ['overageMethod', '超額計算方式'], ['overagePrice', '超額單價']
+];
+const STRUCTURED_PRODUCT_FIELD_APPLICABILITY = {
+  'Deposit-Commission':['bonus', 'overageMethod'],
+  'Survey':['billing', 'price'],
+  'Voice':['billing', 'price']
+};
 const PLAN_REVIEW_HEADERS = [
   'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
   'Reviewer', 'Reviewed At', 'Notes',
@@ -682,9 +695,8 @@ function runContractAudit() {
         'Structured Contract Data 缺失；不得 fallback 到 historical Full Plan Match';
       documentMatch = { result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason };
     }
-    const evidencePopulation = structuredContractEvidencePopulation_(
-      documentMatch && documentMatch.structuredData
-    );
+    const evidencePopulation = documentMatch && documentMatch.evidencePopulation ||
+      structuredContractEvidencePopulation_(documentMatch && documentMatch.structuredData);
     const contractReview = structuredReviewForProtectedGates_(ev, documentMatch, evidencePopulation);
     const billing = billingCycleAudit_(contractReview, queueRows, qx);
     const contract = contractAudit_(contractReview, documentMatch, planChange, billing, queueRows, qx, control, comparison.reason);
@@ -2291,11 +2303,26 @@ function structuredDocumentMatchAudit_(review, queueRows, qx) {
   }
 
   const normalized = normalizeStructuredDocumentProducts_(parsed.data);
-  if (normalized.errors.length) {
-    const reason = 'Structured Contract Data 尚無法可靠比較：' + normalized.errors.join('；');
+  const queueCommissionErrors = structuredDepositCommissionQueueErrors_(queueRows, qx);
+  const productErrors = normalized.errors.concat(queueCommissionErrors);
+  if (productErrors.length) {
+    const reason = 'Structured Contract Data 尚無法可靠比較：' + [...new Set(productErrors)].join('；');
     return {
       result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason,
       structuredData:parsed.data
+    };
+  }
+
+  const evidencePopulation = structuredContractEvidencePopulation_(parsed.data);
+  const evidenceErrors = evidencePopulation.errors.concat(
+    structuredEvidencePopulationConsistencyErrors_(review, parsed.data, evidencePopulation)
+  );
+  if (evidenceErrors.length) {
+    const reason = 'Structured Contract Data evidence integrity 尚無法可靠確認：' +
+      [...new Set(evidenceErrors)].join('；');
+    return {
+      result:'NEEDS_REVIEW', hasInput:true, reason, detail:reason,
+      structuredData:parsed.data, evidencePopulation
     };
   }
 
@@ -2305,7 +2332,8 @@ function structuredDocumentMatchAudit_(review, queueRows, qx) {
     hasInput:true,
     reason:comparison.reason,
     detail:comparison.detail,
-    structuredData:parsed.data
+    structuredData:parsed.data,
+    evidencePopulation
   };
 }
 
@@ -2453,6 +2481,9 @@ function normalizeStructuredDocumentProducts_(data) {
       if (commission.error) errors.push(commission.error);
       else values.bonus = commission.value;
       values.overagePrice = '';
+      if (!values.overageMethod) {
+        errors.push(label + '.deposit_type 必須明確記錄 Deposit-Commission payment method');
+      }
     } else {
       const overagePrice = structuredField_(row, 'overage_unit_price', label, { type:'number' });
       if (overagePrice.error) errors.push(overagePrice.error);
@@ -2472,7 +2503,45 @@ function normalizeStructuredDocumentProducts_(data) {
     }
     lines.push(Object.assign({ product, sourceId, index }, values));
   });
+  const commissionMethods = {};
+  lines.filter(line => line.product === 'Deposit-Commission').forEach(line => {
+    const method = line.overageMethod;
+    if (!method) return;
+    if (!commissionMethods[method]) commissionMethods[method] = [];
+    commissionMethods[method].push(line.index);
+  });
+  Object.keys(commissionMethods).forEach(method => {
+    if (commissionMethods[method].length > 1) {
+      errors.push('Deposit-Commission payment method「' + method + '」在文件中有 duplicate rows：products[' +
+        commissionMethods[method].join('], products[') + ']');
+    }
+  });
   return { lines, errors:[...new Set(errors)] };
+}
+
+function structuredDepositCommissionQueueErrors_(queueRows, qx) {
+  const byMethod = {};
+  const errors = [];
+  queueRows.forEach((row, index) => {
+    const normalized = normalizeQueueDocumentProduct_(row.values, qx);
+    if (normalized.product !== 'Deposit-Commission') return;
+    if (!normalized.overageMethod) {
+      errors.push('Queue Deposit-Commission row ' + (index + 1) + ' 缺少 payment method');
+    }
+    if (normalized.bonus === '') {
+      errors.push('Queue Deposit-Commission row ' + (index + 1) + ' 缺少 commission rate');
+    }
+    if (!normalized.overageMethod) return;
+    if (!byMethod[normalized.overageMethod]) byMethod[normalized.overageMethod] = [];
+    byMethod[normalized.overageMethod].push(index + 1);
+  });
+  Object.keys(byMethod).forEach(method => {
+    if (byMethod[method].length > 1) {
+      errors.push('Queue Deposit-Commission payment method「' + method + '」有 duplicate rows：' +
+        byMethod[method].join(', '));
+    }
+  });
+  return errors;
 }
 
 function structuredField_(row, fieldName, rowLabel, options) {
@@ -2666,17 +2735,38 @@ function structuredDocumentLineDifferences_(documentLine, queueLine, allowAnnual
     adjusted.billing = 'annual';
     adjusted.price = String(monthlyPrice * 12);
   }
-  // Deposit-Commission is a per-transaction rate, not a recurring charge.
-  // Its document billing_period is therefore NotApplicable and must not be
-  // inferred from the main product or compared with Queue's inherited period.
-  const fields = [
-    ['billing', '付款週期'], ['sets', '使用組數'], ['bonus', '贈送組數'], ['price', '價格'],
-    ['share', 'Share Plan ID'], ['overageMethod', '超額計算方式'], ['overagePrice', '超額單價']
-  ].filter(pair => product !== 'Deposit-Commission' || pair[0] !== 'billing');
+  const applicable = STRUCTURED_PRODUCT_FIELD_APPLICABILITY[product] ||
+    STRUCTURED_PRODUCT_COMPARISON_FIELDS.map(pair => pair[0]);
+  const fields = STRUCTURED_PRODUCT_COMPARISON_FIELDS.filter(pair =>
+    applicable.indexOf(pair[0]) >= 0
+  );
   return fields.filter(pair => adjusted[pair[0]] !== queueLine[pair[0]]).map(pair =>
     product + ' ' + pair[1] + '：文件 ' + displayStructuredValue_(documentLine[pair[0]]) +
       '、Queue ' + displayStructuredValue_(queueLine[pair[0]])
   );
+}
+
+function structuredEvidencePopulationConsistencyErrors_(review, data, population) {
+  const evidence = data && data.contract_evidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) return [];
+  const annual = evidence.annual_payment_amount_ntd || evidence.annual_payment_amount ||
+    evidence.annualized_economic_amount_ntd;
+  if (!annual) return [];
+  const fields = population && population.fields || {};
+  const errors = [];
+  STRUCTURED_ANNUAL_PAYMENT_HEADERS.forEach(header => {
+    const existing = review && review[header];
+    if (auditText_(existing) === '') return;
+    const current = fields[header];
+    const same = header === 'Annual Payment Amount (NTD)'
+      ? exactCurrencyAmount_(existing) !== null &&
+        exactCurrencyAmount_(existing) === exactCurrencyAmount_(current)
+      : auditText_(existing) === auditText_(current);
+    if (!same) {
+      errors.push('Review row「' + header + '」與 current Structured Contract Data 不一致');
+    }
+  });
+  return errors;
 }
 
 function structuredLineSignature_(line) {
@@ -2789,10 +2879,26 @@ function structuredContractEvidencePopulation_(data) {
     }
   }
 
-  const annual = evidence.annual_payment_amount_ntd || evidence.annual_payment_amount;
-  const annualPopulation = structuredAnnualPaymentPopulation_(annual, relevant);
-  if (annualPopulation.error) result.errors.push(annualPopulation.error);
-  else if (annualPopulation.fields) Object.assign(result.fields, annualPopulation.fields);
+  const explicitAnnual = evidence.annual_payment_amount_ntd || evidence.annual_payment_amount;
+  const derivedAnnual = evidence.annualized_economic_amount_ntd;
+  let explicitAnnualValid = true;
+  let derivedAnnualValid = true;
+  if (explicitAnnual && explicitAnnual.derived === true) {
+    result.errors.push('explicit annual_payment_amount_ntd 不得標記 derived；請使用 annualized_economic_amount_ntd');
+    explicitAnnualValid = false;
+  }
+  if (derivedAnnual && derivedAnnual.derived !== true) {
+    result.errors.push('annualized_economic_amount_ntd 必須明確標記 derived=true');
+    derivedAnnualValid = false;
+  }
+  const explicitPopulation = explicitAnnualValid
+    ? structuredAnnualPaymentPopulation_(explicitAnnual, relevant) : {};
+  if (explicitPopulation.error) result.errors.push(explicitPopulation.error);
+  else if (explicitPopulation.fields) Object.assign(result.fields, explicitPopulation.fields);
+  const derivedPopulation = derivedAnnualValid
+    ? structuredAnnualPaymentPopulation_(derivedAnnual, relevant) : {};
+  if (derivedPopulation.error) result.errors.push(derivedPopulation.error);
+  else if (!explicitAnnual && derivedPopulation.fields) Object.assign(result.fields, derivedPopulation.fields);
 
   return result;
 }
@@ -2817,14 +2923,20 @@ function structuredAnnualPaymentPopulation_(field, relevantSourceIds) {
   const quote = auditText_(field.quote);
   const locator = auditText_(field.locator || field.location);
   const sourceId = auditText_(field.source_id);
-  const derived = field.derived === true || !!field.derivation;
+  const derived = field.derived === true;
 
   if (!derived) {
+    if (field.derivation) {
+      return { error:'explicit annual_payment_amount_ntd 不得混用 derived derivation' };
+    }
     if (!sourceId || !relevantSourceIds[sourceId]) {
       return { error:'annual_payment_amount_ntd Confirmed 但 source_id 不在 relevant evidence set' };
     }
     if (!quote || !locator) {
       return { error:'annual_payment_amount_ntd Confirmed 時 quote／locator 不得遺漏' };
+    }
+    if (!isPreciseEvidenceLocator_(locator)) {
+      return { error:'annual_payment_amount_ntd Confirmed 時必須提供 precise locator' };
     }
     if (!evidenceQuoteContainsAmount_(quote, amount)) {
       return { error:'annual_payment_amount_ntd quote 必須明確包含文件金額 ' + amount };
@@ -2857,6 +2969,9 @@ function structuredAnnualPaymentPopulation_(field, relevantSourceIds) {
     if (!factSourceId || !relevantSourceIds[factSourceId] || !factQuote || !factLocator) {
       return { error:label + ' 缺少 relevant source_id、quote 或 locator' };
     }
+    if (!isPreciseEvidenceLocator_(factLocator)) {
+      return { error:label + ' 必須提供 precise locator' };
+    }
     const product = fact.product;
     const billing = fact.billing_period;
     const price = fact.price;
@@ -2869,6 +2984,9 @@ function structuredAnnualPaymentPopulation_(field, relevantSourceIds) {
     const billingValue = auditText_(billing.value).toLowerCase();
     if (priceValue === null || (billingValue !== 'annual' && billingValue !== 'monthly')) {
       return { error:label + ' 的 price 或 billing_period 無法計算年度金額' };
+    }
+    if (!evidenceQuoteContainsAmount_(factQuote, priceValue)) {
+      return { error:label + ' 的 quote 必須明確包含文件價格 ' + priceValue };
     }
     calculated += billingValue === 'monthly' ? priceValue * 12 : priceValue;
     locators.push(factLocator);
@@ -2887,15 +3005,26 @@ function structuredAnnualPaymentPopulation_(field, relevantSourceIds) {
   } };
 }
 
+function isPreciseEvidenceLocator_(value) {
+  const text = auditText_(value).toLowerCase();
+  if (!text) return false;
+  return /(?:page\s*\d+|section\s*[\w.-]+|§\s*[\w.-]+|第\s*[\d一二三四五六七八九十百]+\s*(?:頁|條)|(?:頁|table|表格|row|列|cell|儲存格|附件|message|訊息)\s*[#:]?\s*[\w.-]+)/i.test(text);
+}
+
 /**
- * Preserve the existing Deposit-Commission gate by projecting structured
- * facts into its current review-field interface.  Its comparison policy and
- * tolerance remain untouched.
+ * Project single-value structured facts for legacy-compatible review display.
+ * Structured Deposit-Commission authority remains the product-row multiset;
+ * these scalar columns never replace that comparison.
  */
 function structuredReviewForProtectedGates_(review, documentMatch, evidencePopulation) {
   const out = Object.assign({}, review);
   if (!documentMatch || !documentMatch.structuredData) return out;
   const population = evidencePopulation || structuredContractEvidencePopulation_(documentMatch.structuredData);
+  const evidence = documentMatch.structuredData.contract_evidence;
+  if (evidence && (evidence.annual_payment_amount_ntd || evidence.annual_payment_amount ||
+      evidence.annualized_economic_amount_ntd)) {
+    STRUCTURED_ANNUAL_PAYMENT_HEADERS.forEach(header => { out[header] = ''; });
+  }
   Object.assign(out, population.fields || {});
   const products = documentMatch.structuredData.products.filter(row => {
     if (!row || typeof row !== 'object') return false;
@@ -3055,7 +3184,7 @@ function contractAudit_(review, documentMatch, planChange, billing, queueRows, q
   const dates = period.result === 'Pass';
   const structuredMode = documentMatch && documentMatch.result !== 'NO_STRUCTURED_DATA';
   const plan = structuredMode ? documentMatch.result === 'MATCH' : isPass_(review['Full Plan Match']);
-  const depositCommission = depositCommissionAudit_(review, queueRows, qx, control);
+  const depositCommission = depositCommissionAudit_(review, queueRows, qx, control, documentMatch);
   const seals = isPass_(review['Inline Seal']) && isPass_(review['Customer Seal']);
   const directConsent = isPass_(review['Customer Explicit Consent']);
   const agreementEmail = isPass_(review['Agreement Confirmation Text']) &&
@@ -3212,19 +3341,32 @@ function driveFileId_(url) {
  * an explicit structured value prevents a generic Full Plan Match checkbox
  * from hiding a missing Renewal DB value or a malformed renewal email.
  */
-function depositCommissionAudit_(review, queueRows, qx, control) {
+function depositCommissionAudit_(review, queueRows, qx, control, documentMatch) {
   const rows = queueRows.filter(r =>
     auditText_(auditGet_(r.values, qx, '產品', true)).toLowerCase() === 'deposit-commission'
   );
   if (!rows.length) return { result: 'Pass', reason: '' };
 
+  // Structured comparison already performs the authoritative B2C row-level
+  // multiset check on payment method + normalized commission.  Do not apply
+  // the legacy single-rate review-field gate a second time.
+  if (documentMatch && documentMatch.result !== 'NO_STRUCTURED_DATA') {
+    return { result:'Pass', reason:'' };
+  }
+
   const expectedRates = [...new Set(rows.map(r =>
     auditNumber_(auditGet_(r.values, qx, '合約贈送組數', true))
   ).filter(v => v !== null))];
-  if (expectedRates.length !== 1) {
+  if (!expectedRates.length) {
     return {
       result: 'Need Review',
-      reason: 'Queue 的 Deposit-Commission 比例缺漏或同一 Branch 有多個比例，需人工確認 Renewal DB 來源'
+      reason: 'Queue 的 Deposit-Commission 比例缺漏，需人工確認 Renewal DB 來源'
+    };
+  }
+  if (expectedRates.length > 1) {
+    return {
+      result: 'Need Review',
+      reason: 'Legacy Contract Evidence 欄位無法表示多 payment-method Deposit-Commission；請改用 structured row-level review'
     };
   }
 

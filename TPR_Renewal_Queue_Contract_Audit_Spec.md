@@ -77,7 +77,7 @@ Production target 不得硬編碼。Apps Script 必須以 `ENVIRONMENT`、`TARGE
 | `RSV`、`RwG` | 新主產品、組數、贈送組數、價格、Share Plan、超額計算與單價均由 Renewal DB 新方案帶入 |
 | `Deposit` | 帶入付款週期、訂金費用、B2B/B2C 類型、設定費；B2B 的佣金組數依指定欄位處理 |
 | `Deposit-Commission` | 僅用於 B2C，帶入 Credit Card／Virtual ATM 等佣金比例；不填不適用的主產品價格與 Share Plan。合約／信件中的抽成或買入價格必須另行與此比例比對。B2B 交易服務費仍留在 `Deposit` 指定欄位，不建立此產品列 |
-| `Voice`、`Survey`、`eCoupon` | 帶入付款週期；金額依付款週期換算後填入合約價格 |
+| `Voice`、`Survey`、`eCoupon` | 帶入付款週期；金額依付款週期換算後填入合約價格。Structured Document Comparison 中 Survey／Voice 只比較 subscription fee + billing period；使用／贈送／超額欄位不適用 |
 
 ### 4.3 找不到 Renewal DB 資料
 
@@ -140,7 +140,7 @@ RwG structured comparison／normalization 暫不屬本次自動化優化範圍�
 
 續約 Queue 的預設輸出為：RSV 為 annual 時，正費用 add-on 也正規化為 annual，金額為月費 × 12。這個單向正規化不視為換方案。
 
-覆核者必須從合約／完整信件串擷取文件明載的年繳總額，並記錄原文與位置。若文件沒有單一總額欄，但同一 Branch 的產品固定費均為文件內 Confirmed facts，可以從這些 document facts 推導年度總額；必須保存計算式、逐項 quote／location／source，不得由 Queue 加總回推。程式只比較：
+覆核者必須從合約／完整信件串擷取文件明載的 explicit annual payment，並記錄 relevant source、含金額逐字原文與精確 page／section 位置。Explicit payment 與 annualized product economics 是不同語意，前者存在時不得由後者覆寫。只有文件未載明 explicit amount 且同一 Branch 的產品固定費均為文件內 Confirmed facts，才可從 document facts 建立 `derived=true` 的 annualized amount；必須保存計算式、逐項 quote／location／source，不得由 Queue 加總回推。Structured JSON 與 current Review row evidence／provenance 不一致時 fail closed。程式只比較：
 
 `Document annual payment amount = SUM(Queue 固定費用 rows 中 billing period = annual 的合約價格)`
 
@@ -290,7 +290,7 @@ Document Match writer 只能依 index 傳遞的 `targetRowNumber`、Review Batch
 
 Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
 
-每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；其 `billing_period` 固定為 `NotApplicable` 且不參與 Document Comparison，不得由 Queue、主產品或年繳總額猜成 monthly／annual。其 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數仍須精確一致。B2B 的交易服務費文字依既有 B2B／Deposit 欄位語意處理，不建立 `Deposit-Commission`。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
+每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以 product-field applicability matrix 做完整 multiset 比較。Survey／Voice 只比較 subscription fee + billing period；「不限」使用權益另存 entitlement，usage／bonus／overage 商業欄位均為 `NotApplicable`。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；其 `billing_period` 固定為 `NotApplicable`，並只以 payment method + normalized commission 做 exact row-level／multiset comparison。多費率 exact match 可通過；method／rate 缺漏、duplicate／conflict、無法唯一關聯或 row count 不一致則 fail closed。B2B 的交易服務費文字依既有 B2B／Deposit 欄位語意處理，不建立 `Deposit-Commission`。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
 
 每次 structured extraction 都要完成 Contract Evidence completeness check：實際目視 relevant PDF／附件的第 2 頁、末頁與簽署頁；讀完整 Email 串確認明確同意或指定達成合意文字；掃描日期文字不可靠時只對日期區塊做 visual fallback；年繳 Amount、Quote、Location 不得缺一。OCR 沒有印章文字不等於 `NotMentioned`。只有文件本身支持的 facts 可 Confirmed，Queue expected value 不得作 extraction hint。
 
@@ -310,7 +310,7 @@ Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`�
 
 例如 Queue 為 `Credit Card 5%`，文件抽成應為 `5%`，或買入價格應為 `95%`。若文件寫 `100%`、欄位空白、數值不同或未取得所引用的商業協議增補，均不得通過；`Check = FALSE`，並在 `Note` 列出文件值、Queue／Renewal DB 值與正確應有值。此檢查為獨立必要條件，不得由 `Full Plan Match = TRUE` 取代。
 
-同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
+同 Branch 有多個 B2C Deposit-Commission 比例不是獨立人工覆核條件；只要文件與 Queue 的 payment method + normalized commission multiset 可唯一 exact match 即通過 Deposit-Commission gate。
 
 為避免新增欄位後讓已完成的歷史覆核全部失效，強制填寫日由 `Control!Deposit Commission Detail Required From` 控制；預設為 `2026-07-25`。早於該日且兩個新欄位皆空白的既有覆核沿用舊結果，但只要已填入任一比例，仍會立即進行一致性檢查。
 

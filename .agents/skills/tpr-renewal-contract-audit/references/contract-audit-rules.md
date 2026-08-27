@@ -152,12 +152,22 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - 正常通過產品不強制 page、location 或 raw text。Mismatch、Unreadable、Ambiguous、贈送值、年繳總額、Deposit 費率、同意、用印、特殊申請或人工覆核案件可保存 exception locator。
 - 文件與 Queue 採完整產品 multiset 比對，不依列順序。產品多出、缺少、duplicate 數量不同或任何適用欄位不一致，皆為 `MISMATCH`；只有 evidence set 已確認完整時，文件缺少 Queue 產品才是確定 mismatch，否則為 `NEEDS_REVIEW`。
 - `Deposit-Commission` 是逐筆交易費率產品，不具有 monthly／annual recurring billing cadence。Structured extraction 的 `billing_period` 使用 `NotApplicable`，Document Comparison 不比較該欄，也不得用 Queue 週期引導 extraction；仍須精確比較 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數。固定費 `Deposit` 的 `monthly → annual ×12` 規則維持不變。
+- Document Comparison 使用 product-field applicability matrix。`Survey`／`Voice` 只比較 subscription
+  fee 與 billing period；`usage_sets`、`bonus_sets`、`overage_method`、`overage_unit_price` 均為
+  `NotApplicable`。文件的「不限問卷發送組數」或「不限電話轉接及發送簡訊數」是 entitlement，
+  可保存於 sidecar，但不得作為 commercial Queue 欄位比較值。不得以 Branch-specific 例外取代矩陣。
 - 固定費 `Deposit` 的文件價格只有 `state=Confirmed` 才能套用 `monthly → annual ×12`。明確的 `Confirmed 0` 與 Queue `annual 0` 視為相同固定費；`NotMentioned`、`Unreadable`、`Ambiguous` 不得經空值或數值 coercion 當成 0，其中 `Unreadable`／`Ambiguous` 必須 `NEEDS_REVIEW`。此等價不適用於 `Deposit-Commission` 或其他產品。
 - Structured mode 完全不讀 `Full Plan Match` 作為 manual veto；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可以否決 Apps Script 計算出的 MATCH。blank、checkbox 預設的 boolean `false` 與其他 token 都不構成 veto。Structured data 不存在的 legacy review 才維持原本 `Full Plan Match` 行為。
 - `Contract Evidence Review` migration 必須依完整 header name 定位。既有 header reuse，缺少的新 header append 到最右側，舊版額外欄保留；不得刪除、重新排序或覆蓋。必要 header duplicate 或無法唯一 mapping 時必須在任何 Sheet write 前 fail closed。
 - Document Match writer 必須以 index 傳遞的實際 `targetRowNumber`、`Review Batch ID`、Version 與 JSON snapshot 寫入。Active Batch mode 下，真正寫入前須重新讀最新 Sheet snapshot，確認 target row 的 Branch ID／Batch ID 未變、它仍是該 Branch 在 current batch 的唯一 row、Version `1` 與 JSON 非空且都和 indexing snapshot 一致。任一 identity／內容改變或 current-batch duplicate 必須 zero writes 並 fail closed；其他 batch／blank-batch historical rows不得造成 conflict，也不得被寫入。Legacy mode 維持原本「唯一完整 structured row」writer preflight。
 - Structured Contract Data 中已確認的 Contract Evidence facts 必須由 Apps Script 依 header name 投影到同一個 current-batch review row；writer 使用與 Document Match 相同的 Branch／Batch／row identity 與 latest-snapshot preflight。只可寫明確受支援的 evidence 欄位，historical rows 不得更新；任一欄在 indexing 後被人工修改時整批 zero writes。
 - Contract Evidence population 必須完整：日期只取有效且有 source／locator 的 `Confirmed` facts；印章只有 `verification=visual`、source 與 locator 完整時可寫入；明確 Email 同意或指定達成合意確認必須有 quote、locator、語意 kind 與正確 sender；年繳金額必須同時寫 Amount、Evidence Quote、Evidence Location。`NotMentioned`／`Unreadable`／`Ambiguous` 或不完整 provenance 不得 coercion 成通過值。
+- Explicit annual payment 與 annualized economic amount 是不同語意。文件明載付款金額時以 explicit
+  value 為 authority，且 Confirmed 必須具有 value、relevant source ID、含金額逐字 quote 與精確
+  page／section locator。文件未載明 explicit amount 時，才可由 Confirmed document product facts 建立
+  `derived=true` 的 annualized amount，並保存 calculation、component facts 與 provenance。禁止 Queue
+  backfill、無來源 Confirmed、invented quote 或 stale Review row 覆蓋 current JSON；JSON 與 current
+  Review evidence／provenance 不一致時，Document Match fail closed 為 `NEEDS_REVIEW`。
 - Evidence facts 與既有 Contract gate 的映射為：confirmed start/end → `Contract Start Date`／`Contract End Date`；visually confirmed seals → `Inline Seal`／`Customer Seal`；explicit customer consent → `Customer Explicit Consent`；指定書面確認 → `Agreement Confirmation Text` + `Confirmation Sender`；合法 annual fact → 年繳 Amount／Quote／Location。這只是 evidence population adapter，不改變 `contractAudit_()`、Special、Share、Historical、Deposit、Long-term 或 Final Check policy。
 - `Plan Classification Review` 在 Active Batch mode 使用相同的 `Branch ID + Review Batch ID` identity：每個 Queue Branch 在 current batch 必須恰好一列，缺列或重複列均在 trace write 前 fail closed，其他／blank batch rows 一律是 historical。Plan trace 必須攜帶 indexing 取得的 `targetRowNumber`；writer 在任何 trace write 前重新讀最新 Sheet snapshot，確認 Branch、Batch、current-batch 唯一性與 row number 都未改變，任一不符即全批 zero writes。只有 Active Batch ID 空白時才保留 legacy first-matching-row read／write 行為。
 
@@ -195,7 +205,12 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 ### 7.1 主產品 annual
 
 - Queue 轉換後的正費用 add-on 原則上寫為 annual，年度金額為月費 × 12；這是原方案續約的單向正規化。
-- 從雙方用印合約或合格的完整 Email 串擷取文件明載的「年繳總額」。若文件未以單一欄位列總額，但同一 Branch 的產品固定費在文件中均為 Confirmed，可依文件 product facts 推導年度總額。`Annual Payment Amount (NTD)` 必須同時具有 `Annual Payment Evidence Quote` 與 `Annual Payment Evidence Location`；衍生值必須保存計算式、每個 source product 的 product／billing／price、quote、locator 與 source ID。不得由 Queue 加總回推。
+- 從雙方用印合約或合格的完整 Email 串擷取文件明載的 explicit annual payment。它與 annualized product
+  economics 分開保存，且一旦存在即為付款金額 authority。Confirmed explicit value 必須具有 relevant
+  source ID、包含金額的逐字 quote 與精確 page／section locator。只有文件未明載 explicit amount，且同一
+  Branch 的產品固定費均為 Confirmed document facts 時，才可推導 `derived=true` 的 annualized amount；
+  必須保存計算式、每個 source product 的 product／billing／price、quote、locator 與 source ID。不得由
+  Queue 加總回推，也不得讓 derived value 覆寫 explicit payment。
 - 文件年繳總額只與該 Branch 的 Queue 中 `付款週期=annual` 的固定方案合約價格加總比較。只正規化幣別文字、千分位與空白後做精確數值相等比較；不得容許 ±1 元或其他誤差。
 - Queue 的 monthly add-on 不納入年繳總額；其月費仍必須在完整方案覆核中與文件逐項精確相等。交易費、抽成、信用卡處理費、超額與用量變動費用不納入固定年繳總額。
 - RSV 年繳但任一正費用 add-on 續約後仍為 monthly 時，定義為 split-billing 例外。只有雙方用印合約可以支持，單純 Email 同意不足；Queue 必須保留該 add-on 為 monthly，文件年繳總額只包含 annual rows。
@@ -255,9 +270,10 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 - Document Comparison 以完整 product multiset 逐列比較每個 payment method、commission／buy-in
   與產品列數。多費率本身不構成 extraction／comparison 的 `NEEDS_REVIEW`；若文件與 Queue 的每列
   都能唯一配對且數值一致，structured Document Match 可以是 `MATCH`。
-- Final Policy 是後續獨立 gate：同 Branch 有多個 `Deposit-Commission` 比例時，即使 structured
-  Document Match 為 `MATCH`，既有 protected `depositCommissionAudit_()` 仍回傳 `Need Review`；
-  Document Match 不代表 Final Check Ready，本輪不自動放行多費率案件。
+- B2C Deposit-Commission gate 使用 payment method + normalized commission 的 exact row-level／multiset
+  結果。Credit Card 與 Virtual ATM 等多個 unique rate 本身不是人工覆核條件；exact match 即通過。
+  Payment method／rate 缺漏、row count 不一致、duplicate／conflicting rows，或無法唯一將 rate 對應
+  payment method 時 fail closed／`NEEDS_REVIEW`。不得硬編碼特定 Branch 或餐廳。
 
 ## 10. 方案家族與特殊申請
 

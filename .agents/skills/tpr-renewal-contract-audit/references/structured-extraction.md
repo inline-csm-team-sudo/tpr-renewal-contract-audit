@@ -136,9 +136,9 @@ B2B Deposit 條文事實，依既有 B2B／Deposit audit 欄位語意保存；�
 | B2B「交易服務費 5%」 | 只建立／保留 `Deposit` row；將 5% 視為 B2B clause-recognition fact，依既有 B2B／Deposit 欄位語意保存；不得建立 `Deposit-Commission` | 不套用 B2C buy-in／commission row normalization |
 
 多費率 B2C 文件只影響 product-row 數與逐列 Document Comparison。若每列 payment method、commission／
-buy-in 與 Queue 均可唯一配對，Document Match 可以是 `MATCH`；目前既有 protected
-`depositCommissionAudit_()` 仍可在 Final Check 階段要求人工 Review。Extraction 不預先產生
-`NEEDS_REVIEW`，也不改變該 protected policy。
+buy-in 與 Queue 均可唯一配對，Document Match 與 Deposit-Commission gate 均可通過；多個 unique rate
+本身不是人工覆核條件。Payment method 或 rate 缺漏、同一 method duplicate／conflict、row count 不一致，
+或無法唯一連結 method 與 rate 時，必須 fail closed／`NEEDS_REVIEW`，不得任選一列或合併費率。
 
 ## Share document coverage manifest
 
@@ -217,6 +217,21 @@ evidence 無法完整讀取。
 - `commission_rate`、`buy_in_price`：B2C `Deposit-Commission` 的交易抽成或買入價格；多種 payment
   method 分列。B2B 交易服務費依既有 B2B／Deposit row 語意保存，不產生 `Deposit-Commission`。
 
+### Product-field applicability matrix
+
+Reader 必須依 product semantics 決定欄位 state，不得把條文 entitlement 填入不相干的商業欄位：
+
+| Product | Document Comparison 欄位 | 必須為 `NotApplicable` 的商業欄位 |
+| --- | --- | --- |
+| Survey | `billing_period`、`price` | `usage_sets`、`bonus_sets`、`overage_method`、`overage_unit_price` |
+| Voice | `billing_period`、`price` | `usage_sets`、`bonus_sets`、`overage_method`、`overage_unit_price` |
+| Deposit-Commission | `deposit_type`（payment method）、`commission_rate`／`buy_in_price` | `billing_period`、`usage_sets`、`price`、一般 overage 欄位 |
+
+「不限問卷發送組數」與「不限電話轉接及發送簡訊數」是 entitlement description。可另存
+`entitlement={state:"Confirmed",value:"unlimited",...}`，但不得映射成 `usage_sets=unlimited`、
+`bonus_sets`、`overage_method` 或 `overage_unit_price=0`。本矩陣是 canonical product-level authority，
+不得以 Branch／餐廳例外取代。
+
 Schema-required 但未記載的欄位仍要輸出 field object，依 field-state gate 使用
 `NotMentioned` 或 `NotApplicable`，不可漏 key。正常 product 必須至少包含：
 `product`、`billing_period`、`usage_sets`、`bonus_sets`、`price`、`share_plan_id`；非 Deposit 類另有
@@ -231,9 +246,12 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
 - `restaurant_name`：文件實際文字。換行、空白與已知 OCR 異體可另記 raw value；無法唯一確認時
   使用 `Ambiguous`。多店文件保存所有明示店名，不以 Queue 名稱覆蓋。
 - `contract_start_date`、`contract_end_date`：只比較日曆日期，輸出 `yyyy-MM-dd`，忽略時間。
-- `annual_payment_amount_ntd`：文件明載的年繳總額，或由同一 Branch 的已確認文件 product facts
-  推導的年度固定費；兩者都必須保存 quote／locator。衍生值另保存 calculation 與逐項
-  `source_product_facts`，不得由 Queue 回推。
+- `annual_payment_amount_ntd`：文件明載的 explicit annual payment。這是付款條文明確要求本次支付的
+  金額，不等於 annualized product economics；`Confirmed` 必須同時保存 value、relevant `source_id`、
+  含該金額的逐字 quote 與精確 page／section locator。
+- `annualized_economic_amount_ntd`：僅在文件沒有 explicit annual payment、且可由同一 Branch 的
+  Confirmed document product facts 合法推導時使用。必須保存 `derived=true`、calculation、逐項
+  `source_product_facts` 與 provenance。不得用它覆寫 explicit annual payment，也不得由 Queue 回推。
 - `inline_seal`、`customer_seal`、`signature`：必須實際視覺檢查簽署／用印區。OCR 或檔案存在不能
   證明有或沒有；尚未視覺確認時使用 `Unreadable` 或提出 fallback。
 - `consent_evidence`：完整 email thread 的實際同意文字、sender 與 locator；信件檔案存在不等於
@@ -253,11 +271,15 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
 - **Period：**掃描／圖片文件的文字層無法可靠提供日期時，只 fallback 合約日期區域並目視確認。
   只有年、月、日皆可可靠閱讀且為有效日曆日期時才 `Confirmed`；否則維持 `Unreadable`／
   `Ambiguous`，不得由 Queue 的預期期間補值。
-- **Annual payment：**任何 `Confirmed` 年繳金額都必須同時具有支持該金額的 quote 與 locator。
-  文件若沒有單一總額，但同一 Branch 的產品費用均是文件中已確認的 facts，可建立
-  `derived=true` 的 document-based annual total；必須保存完整計算式、每個 source product 的
-  product／billing／price、quote、locator 與 source ID。不得使用 Queue annual 合計或 Queue 產品值
-  反推文件金額。
+- **Annual payment：**文件明確寫 annual payment 時，explicit fact 為 authority；任何 `Confirmed`
+  explicit amount 必須具有 value、relevant source ID、包含該金額的逐字 quote 與精確 page／section
+  locator，缺一即 `Unreadable`／`Ambiguous` 或交 `NEEDS_REVIEW`，不得 Confirmed。只有文件未載明 explicit
+  payment 且同一 Branch 的產品費用均為 Confirmed document facts 時，才可建立 `derived=true` 的
+  document-based annualized amount；必須保存完整計算式、每個 source product 的 product／billing／
+  price、quote、locator 與 source ID。Explicit payment 與 annualized economic amount 必須用不同語意
+  欄位保存，後者不得覆寫前者。禁止使用 Queue annual 合計或 Queue 產品值反推、生成文件不存在的
+  quote，或讓 stale Review row Amount／Quote／Location 覆蓋 current structured JSON。JSON 與 Review row
+  evidence／provenance 不一致時 fail closed。
 - **Shared contract：**先依文件明示的 restaurant scope 建立每個 Branch 自己的 document-based
   annual amount，再用 shared document total 作 cross-check。Group total 不得取代逐 Branch facts，也
   不得把整組金額寫成單一 Branch 的 `annual_payment_amount_ntd`。例如每店文件 facts 為 RSV 21,600
@@ -288,7 +310,7 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
 
 ```json
 {
-  "annual_payment_amount_ntd": {
+  "annualized_economic_amount_ntd": {
     "state": "Confirmed",
     "value": 25200,
     "derived": true,
@@ -378,12 +400,27 @@ billing period or price. Deposit-Commission is a per-transaction rate with no re
 set its billing_period to NotApplicable and never infer monthly or annual from the main product, fixed
 Deposit fee, annual total, or Queue.
 
+Apply the product-field applicability matrix. Survey and Voice compare only subscription price and billing
+period. Preserve unlimited survey sends or unlimited phone/SMS usage only as an entitlement sidecar; set
+usage_sets, bonus_sets, overage_method, and overage_unit_price to NotApplicable. Never turn entitlement
+wording into commercial usage or overage values.
+
 Apply the Deposit clause-semantic triggers above. Only in B2C Deposit/payment-method context, an explicit
 buy-in price, B2C commission, or payment-method transaction rate requires a Deposit-Commission row even
 when that product name is absent. Create one row per B2C payment method/rate. Preserve a literal buy-in as
 buy_in_price and a direct B2C commission percentage as commission_rate; do not convert one into the other
 in reader output. Resolve payment method only from the document context. B2B transaction-service-fee text
 is a B2B Deposit clause fact and must not create a Deposit-Commission row.
+
+For B2C Deposit-Commission, create exactly one row per uniquely associated payment method and rate. Multiple
+methods/rates are valid when their exact method + normalized-commission multiset matches Queue. Missing rate
+or method, duplicate/conflicting method rows, or ambiguous method-to-rate association must remain unresolved
+and fail closed; never merge or select one rate.
+
+For annual evidence, keep explicit annual payment separate from annualized product economics. An explicit
+Confirmed fact requires value, relevant source_id, an amount-bearing verbatim quote, and a precise page or
+section locator. A derived fact requires derived=true, calculation, confirmed component facts, and their
+provenance. Do not infer from Queue, invent quote text, or reuse a stale Review-row amount.
 
 Apply the field-state gate strictly. NotMentioned requires a complete inspection of the product section,
 headers, merged cells, footnotes, attachments, and related text. OCR blank or an omitted extraction is not

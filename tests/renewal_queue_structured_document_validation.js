@@ -281,9 +281,11 @@ const annualFixtures = [
   derivedAnnualEvidence(1200), derivedAnnualEvidence(250)
 ];
 annualFixtures.forEach((annualField, index) => {
-  const annualPopulation = api.structuredContractEvidencePopulation_(evidenceData({
-    annual_payment_amount_ntd:annualField
-  }));
+  const annualPopulation = api.structuredContractEvidencePopulation_(evidenceData(
+    annualField.derived
+      ? { annualized_economic_amount_ntd:annualField }
+      : { annual_payment_amount_ntd:annualField }
+  ));
   assert.notStrictEqual(annualPopulation.fields['Annual Payment Amount (NTD)'], undefined,
     'annual fixture ' + index);
   assert.ok(annualPopulation.fields['Annual Payment Evidence Quote'], 'annual quote ' + index);
@@ -291,7 +293,7 @@ annualFixtures.forEach((annualField, index) => {
   assert.strictEqual(annualPopulation.errors.length, 0, 'annual fixture ' + index);
 });
 population = api.structuredContractEvidencePopulation_(evidenceData({
-  annual_payment_amount_ntd:derivedAnnualEvidence()
+  annualized_economic_amount_ntd:derivedAnnualEvidence()
 }));
 assert.strictEqual(population.fields['Annual Payment Amount (NTD)'], 25200);
 assert.match(population.fields['Annual Payment Evidence Quote'], /21600.*300.*12.*25200/);
@@ -308,11 +310,77 @@ assert.doesNotMatch(population.fields['Annual Payment Evidence Quote'], /50400/)
   { state:'Ambiguous', source_id:'FILE1', locator:'page 1 total' }
 ].forEach(annualField => {
   const annualPopulation = api.structuredContractEvidencePopulation_(evidenceData({
-    annual_payment_amount_ntd:annualField,
+    [annualField.derived ? 'annualized_economic_amount_ntd' : 'annual_payment_amount_ntd']:annualField,
     queue_expected_amount:25200
   }));
   assert.strictEqual(annualPopulation.fields['Annual Payment Amount (NTD)'], undefined);
 });
+
+// An explicit annual payment is a different semantic fact from annualized
+// product economics.  The explicit document value remains authoritative and
+// cannot be overwritten by the sidecar economic amount.
+let explicitAnnualData = evidenceData({
+  annual_payment_amount_ntd:{
+    state:'Confirmed', value:18000, source_id:'FILE1',
+    quote:'乙方須依甲方指示付款新台幣 18,000 元',
+    locator:'page 1 / section 4.1 / 給付方式'
+  },
+  annualized_economic_amount_ntd:derivedAnnualEvidence(1500, 18000)
+});
+population = api.structuredContractEvidencePopulation_(explicitAnnualData);
+assert.strictEqual(population.fields['Annual Payment Amount (NTD)'], 18000);
+assert.match(population.fields['Annual Payment Evidence Quote'], /18,000/);
+result = match(explicitAnnualData, [queueRow()], {
+  'Annual Payment Amount (NTD)':18000,
+  'Annual Payment Evidence Quote':'乙方須依甲方指示付款新台幣 18,000 元',
+  'Annual Payment Evidence Location':'page 1 / section 4.1 / 給付方式'
+});
+assert.strictEqual(result.result, 'MATCH');
+
+// A generic location is not precise provenance for a Confirmed explicit
+// annual amount.
+population = api.structuredContractEvidencePopulation_(evidenceData({
+  annual_payment_amount_ntd:{
+    state:'Confirmed', value:18000, source_id:'FILE1',
+    quote:'年繳新台幣 18,000 元', locator:'完整合約／Email 給付方式'
+  }
+}));
+assert.strictEqual(population.fields['Annual Payment Amount (NTD)'], undefined);
+assert.match(population.errors.join('；'), /precise locator/);
+
+// Structured mode must surface evidence-integrity errors as NEEDS_REVIEW;
+// product rows matching the Queue cannot hide missing provenance.
+let invalidAnnualData = evidenceData({
+  annual_payment_amount_ntd:{ state:'Confirmed', value:30000 }
+});
+result = match(invalidAnnualData);
+assert.strictEqual(result.result, 'NEEDS_REVIEW');
+assert.match(result.reason, /annual_payment_amount_ntd/);
+
+// A stale Review row value/quote/location cannot override or disagree with
+// the current structured JSON.  The inconsistency must fail closed.
+result = match(explicitAnnualData, [queueRow()], {
+  'Annual Payment Amount (NTD)':30000,
+  'Annual Payment Evidence Quote':'年繳新台幣 30,000 元',
+  'Annual Payment Evidence Location':'舊 review row'
+});
+assert.strictEqual(result.result, 'NEEDS_REVIEW');
+assert.match(result.reason, /Review row.*Structured Contract Data.*不一致/);
+
+// rooTi-shaped evidence: the explicit payment clause remains 18,000 even
+// though annualized fixed product economics are 36,000.  The billing gate
+// must retain the mismatch and report the real document value.
+const explicitPayment18000 = api.structuredContractEvidencePopulation_(explicitAnnualData);
+const annual36000Queue = [
+  queueRow({ product:'RSV', billing:'annual', price:18000 }),
+  queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:'', price:18000,
+    overageMethod:'B2C', overagePrice:10 })
+].map(values => ({ values }));
+const explicitPaymentAudit = api.billingCycleAudit_(explicitPayment18000.fields, annual36000Queue, qx);
+assert.strictEqual(explicitPaymentAudit.result, 'Fail');
+assert.match(explicitPaymentAudit.reason, /文件 18,000 元/);
+assert.match(explicitPaymentAudit.reason, /Queue annual 合約價格合計 36,000 元/);
+assert.doesNotMatch(explicitPaymentAudit.reason, /文件 30,000 元/);
 
 // Case 4: extra document product.
 data = structuredData([product(), voiceProduct()]);
@@ -428,6 +496,35 @@ data = structuredData([
 ]);
 assert.strictEqual(match(data, queueWithVoice).result, 'MATCH');
 
+// Product-field applicability is centralized: Survey and Voice compare only
+// subscription price + billing period.  "Unlimited" is an entitlement fact,
+// not a commercial usage/bonus/overage value.
+[
+  { productName:'Survey', monthlyPrice:2000, annualPrice:24000 },
+  { productName:'Survey', monthlyPrice:2000, annualPrice:24000 },
+  { productName:'Survey', monthlyPrice:1000, annualPrice:12000 },
+  { productName:'Survey', monthlyPrice:500, annualPrice:6000 },
+  { productName:'Voice', monthlyPrice:1000, annualPrice:12000 }
+].forEach((fixture, index) => {
+  const documentProduct = product({
+    product:field('Confirmed', fixture.productName),
+    billing_period:field('Confirmed', 'monthly'),
+    usage_sets:field('Confirmed', 'unlimited'),
+    bonus_sets:field('NotApplicable'),
+    price:field('Confirmed', fixture.monthlyPrice),
+    share_plan_id:field('NotApplicable'),
+    overage_method:field('Confirmed', 'unlimited'),
+    overage_unit_price:field('Confirmed', 0),
+    entitlement:field('Confirmed', 'unlimited')
+  });
+  const queue = [queueRow(), queueRow({
+    product:fixture.productName, billing:'annual', sets:'', bonus:'',
+    price:fixture.annualPrice, share:'', overageMethod:'', overagePrice:''
+  })];
+  assert.strictEqual(match(structuredData([product(), documentProduct]), queue).result, 'MATCH',
+    fixture.productName + ' applicability fixture ' + index);
+});
+
 // Deposit-Commission uses semantic commission/buy-in fields and exact Queue comparison.
 const commissionQueue = [
   queueRow(),
@@ -537,6 +634,32 @@ assert.strictEqual(
   match(structuredData([creditCardBuyIn955, virtualAtmBuyIn985]), multiMethodCommissionQueue).result,
   'MATCH'
 );
+// A structured exact multiset match is authoritative for B2C multi-rate
+// Deposit-Commission.  Multiple unique rates alone must not trigger a second
+// legacy manual gate.
+data = structuredData([creditCardBuyIn955, virtualAtmBuyIn985]);
+result = match(data, multiMethodCommissionQueue);
+assert.strictEqual(result.result, 'MATCH');
+assert.strictEqual(
+  contract(reviewFor(data), result, multiMethodCommissionQueue).result,
+  'Pass'
+);
+
+// Missing method/rate, count mismatch, conflicts, and ambiguous association
+// remain fail closed in the structured comparison layer.
+assert.strictEqual(
+  match(structuredData([creditCardBuyIn955]), multiMethodCommissionQueue).result,
+  'MISMATCH'
+);
+const conflictingCommission = travelCommission({
+  deposit_type:field('Confirmed', 'Credit Card'),
+  commission_rate:field('Confirmed', 2.5),
+  buy_in_price:field('Confirmed', 96)
+});
+assert.strictEqual(
+  match(structuredData([conflictingCommission]), [multiMethodCommissionQueue[0]]).result,
+  'NEEDS_REVIEW'
+);
 
 // Deposit clause extraction regression 3: a B2B transaction-service rate is
 // a field on the B2B Deposit row. It must never create Deposit-Commission.
@@ -582,7 +705,7 @@ const unknownMethodCommission5 = travelCommission({
 });
 assert.strictEqual(
   match(structuredData([unknownMethodCommission5]), creditCardCommission5Queue).result,
-  'MISMATCH'
+  'NEEDS_REVIEW'
 );
 const ambiguousMethodCommission5 = travelCommission({
   deposit_type:field('Ambiguous'), commission_rate:field('Confirmed', 5),
@@ -590,6 +713,12 @@ const ambiguousMethodCommission5 = travelCommission({
 });
 assert.strictEqual(
   match(structuredData([ambiguousMethodCommission5]), creditCardCommission5Queue).result,
+  'NEEDS_REVIEW'
+);
+assert.strictEqual(
+  match(structuredData([creditCardBuyIn95, creditCardBuyIn95]), [
+    creditCardCommission5Queue[0], creditCardCommission5Queue[0]
+  ]).result,
   'NEEDS_REVIEW'
 );
 
@@ -647,10 +776,10 @@ data = structuredData([travelRsv, travelDeposit]);
 assert.strictEqual(match(data, travelQueue).result, 'MISMATCH');
 
 data = structuredData([travelRsv, travelDeposit, travelCommission(), travelCommission()]);
-assert.strictEqual(match(data, travelQueue).result, 'MISMATCH');
+assert.strictEqual(match(data, travelQueue).result, 'NEEDS_REVIEW');
 
-// Every multi-rate row may match the document while the existing protected
-// Deposit-Commission policy still keeps the Branch in Need Review.
+// Every B2C multi-rate row is deterministic when payment method + normalized
+// commission form an exact multiset match.
 const multiRateQueue = [
   queueRow({ sets:1200, price:12000, overagePrice:10 }),
   queueRow({ product:'Deposit', billing:'annual', sets:'', bonus:'', price:0,
@@ -677,7 +806,7 @@ data = structuredData([
 ]);
 result = match(data, multiRateQueue);
 assert.strictEqual(result.result, 'MATCH');
-assert.strictEqual(contract(reviewFor(data), result, multiRateQueue).result, 'Need Review');
+assert.strictEqual(contract(reviewFor(data), result, multiRateQueue).result, 'Pass');
 
 // Protected downstream policy cases: structured MATCH does not bypass later gates.
 const pass = { result:'Pass', reason:'' };
@@ -1179,14 +1308,14 @@ const annualDepositQueue = [
     overageMethod:'B2C', overagePrice:0 })
 ].map(values => ({ values }));
 const derivedPopulation = api.structuredContractEvidencePopulation_(evidenceData({
-  annual_payment_amount_ntd:derivedAnnualEvidence()
+  annualized_economic_amount_ntd:derivedAnnualEvidence()
 }));
 assert.strictEqual(
   api.billingCycleAudit_(derivedPopulation.fields, annualDepositQueue, qx).result,
   'Pass'
 );
 const sharedOnlyPopulation = api.structuredContractEvidencePopulation_(evidenceData({
-  annual_payment_amount_ntd:{ state:'Confirmed', value:50400, derived:true,
+  annualized_economic_amount_ntd:{ state:'Confirmed', value:50400, derived:true,
     derivation:{ calculation:'shared total = 50400', source_product_facts:[] } }
 }));
 assert.strictEqual(

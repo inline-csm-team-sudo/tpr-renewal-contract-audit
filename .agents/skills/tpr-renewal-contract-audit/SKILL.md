@@ -50,6 +50,11 @@ When the user says「從頭跑一次續約流程」or equivalent:
 7. For PDFs or photographs, inspect every relevant page visually; OCR or extracted text is only an aid.
 8. Before freezing Structured Contract Data, complete the evidence checklist for every Branch: inspect every relevant signature/seal page (including page 2, the final page and relevant folder attachments), locate explicit consent or designated written agreement evidence, confirm the renewal period, and preserve annual-payment amount plus quote/location or a document-only derivation with provenance. Text extraction alone cannot close a visual seal/signature field; run the field-local visual fallback defined by `references/structured-extraction.md` whenever the field requires visual evidence.
 9. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.
+   Apply the permanent product-field matrix: Survey and Voice compare only subscription fee and billing
+   period; entitlement wording such as unlimited survey sends or phone/SMS usage is preserved as an
+   entitlement sidecar, never as commercial usage, bonus, or overage. For B2C Deposit-Commission, preserve
+   one row per payment method/rate and let Apps Script compare the exact method + normalized-commission
+   multiset; multiple rates alone are not a manual-review condition.
 10. For every current Queue Share Plan, preserve document-level Share coverage manifests while reading each
     relevant evidence file only once. Run the mandatory deterministic Share workflow: Queue Share ID versus
     document Share ID; union of document-covered members versus the current Queue member set; current-batch
@@ -71,6 +76,11 @@ Running the Apps Script audit alone is not a completed review. Codex must read t
 - Use PDF rendering and page screenshots for scanned or image-only contracts.
 - Read an entire email thread and all relevant files in a linked folder, not only the first attachment.
 - Treat seal/signature pages, explicit consent, renewal dates and annual-payment provenance as mandatory evidence-completeness fields. OCR silence is not `NotMentioned`; inspect the relevant visual page or leave the field `Unreadable`/`Ambiguous`.
+- Treat explicit annual payment and annualized product economics as different document facts. A Confirmed
+  explicit payment needs its own relevant source ID, verbatim amount-bearing quote, and precise page／section
+  locator. A derived amount needs an explicit derived marker, calculation, confirmed source components, and
+  provenance. Never invent a quote, backfill from Queue, or let a stale Review row override current JSON;
+  any JSON／Review provenance conflict fails closed.
 - Structured extraction may use Gemini or another document reader, but its output must follow the provider-neutral schema. The reader reports document facts and field states only; it does not decide MATCH/MISMATCH.
 - Extraction safety is ordered `correct Confirmed` first, `Ambiguous` or `Unreadable` second, and guessed `Confirmed` last. A completed extraction has zero wrong-Confirmed fields; first-pass usability never justifies guessing.
 - Normal passing products do not require page, location, or raw text. Preserve a source locator for mismatches, unreadable or ambiguous fields, bonus values, annual totals, Deposit rates, consent, seals, special evidence, or other manual-review exceptions when available.

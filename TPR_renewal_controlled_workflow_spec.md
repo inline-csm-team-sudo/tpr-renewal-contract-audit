@@ -145,7 +145,7 @@ Gemini 是目前優先 extraction reader，但 Apps Script 不依賴 Gemini-spec
 
 Structured mode 完全忽略 `Full Plan Match`；只有 `Manual Plan Veto` 的明確文字 `Fail`、`Failed`、`FALSE`、`不通過` 或 `不一致` 可否決 calculated MATCH。blank、boolean `false` 或其他 token 都不是 structured veto。只有 legacy mode 維持原本 `Full Plan Match` 行為。
 
-RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；structured `billing_period` 使用 `NotApplicable` 且不參與 Document Comparison，不得依 Queue 或主產品猜測 monthly／annual，仍精確比較 payment method、commission／buy-in 與 row count。B2B 交易服務費只作為 B2B／Deposit 條文事實，不建立 Commission product row。固定費 Deposit 的 `monthly → annual ×12` 正規化維持不變。同 Branch 有多個 Deposit-Commission 比例時，即使 structured Document Match 為 `MATCH`，既有 protected Deposit-Commission gate 仍回傳 `Need Review`；本輪不自動放行多費率案件。
+RwG structured comparison／normalization 暫不屬本次自動化優化範圍；RwG 是否可通過仍必須經既有 Special Approval gate。Structured comparison 使用 product-field applicability matrix：Survey／Voice 只比較 subscription fee + billing period，「不限」使用權益另存 entitlement，usage／bonus／overage 商業欄位為 `NotApplicable`。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；structured `billing_period` 使用 `NotApplicable`，並以 payment method + normalized commission 做 exact row-level／multiset comparison。多個 unique rate 本身可自動通過；method／rate 缺漏、duplicate／conflict、row count 不一致或無法唯一關聯才 fail closed。B2B 交易服務費只作為 B2B／Deposit 條文事實，不建立 Commission product row。固定費 Deposit 的 `monthly → annual ×12` 正規化維持不變。
 
 `Contract Evidence Review` migration 與所有 structured read／write 均依 header name 定位。已存在欄位 reuse，缺少欄位 append 到最右側，舊欄與舊 implementation 額外欄完整保留。新增 row 依 Sheet 實際欄寬建立，只填 Branch ID、Evidence URL、`Structured Review Version=1`。必要 header duplicate 或 mapping 無法唯一判定時，必須在任何 Sheet write 前停止。
 
@@ -153,7 +153,7 @@ Structured evidence population 由 Apps Script 將 frozen JSON 的 confirmed fac
 
 正常通過的 product 不強制保存 page、location 或 raw text；只有 mismatch、ambiguous、unreadable、bonus、annual total、Deposit commission／buy-in、consent、dual seal、special evidence 或人工覆核例外需在可取得時保留 locator。完整產品 multiset 必須逐項與 Queue 比較，包含 duplicate、missing／extra product、週期、組數、贈送、價格、Share、超額及 Deposit 條件。
 
-當 RSV／RwG 主產品為 annual 且存在正費用 add-on 時，`Contract Evidence Review` 必須保存文件年繳總額、支持原文與文件／Email 位置；不得由 Queue 加總回推。文件沒有單一總額欄時，可由同一 Branch 的 confirmed document product facts 推導，但必須保存計算式及每個 source product 的 product／billing／price／quote／locator／source ID。Shared contract 先建立逐 Branch amount，group total 只作 cross-check。文件年繳總額必須與該 Branch 的 Queue 全部 annual 固定方案價格加總完全相等；monthly add-on 另由完整方案覆核比對月費，不納入年繳總額。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額。比較不允許金額誤差。
+當 RSV／RwG 主產品為 annual 且存在正費用 add-on 時，`Contract Evidence Review` 必須保存文件明載的 explicit annual payment、relevant source、含金額逐字原文與精確 page／section 位置；不得由 Queue 加總回推或生成文件不存在的 quote。Explicit payment 與 annualized product economics 分開保存，前者存在時不得被後者覆寫。只有文件未明載 explicit amount 時，可由同一 Branch 的 confirmed document product facts 建立 `derived=true` annualized amount，並保存計算式及每個 source product 的 product／billing／price／quote／locator／source ID。Structured JSON 與 current Review row evidence／provenance 不一致時 fail closed。Shared contract 先建立逐 Branch amount，group total 只作 cross-check。文件年繳金額必須與該 Branch 的 Queue 全部 annual 固定方案價格加總完全相等；monthly add-on 另由完整方案覆核比對月費，不納入年繳總額。交易費、抽成、超額、信用卡處理費與用量變動費用不納入固定金額。比較不允許金額誤差。
 
 RSV annual 但正費用 add-on 續約後仍為 monthly 時，屬 split-billing 例外。Queue 必須保留 monthly 週期與月費，文件年繳總額只包含 annual rows，並必須有雙方用印合約；完整 Email 同意不足。程式僅可將不一致寫為 Branch 層級 `Check=FALSE` 與具體 Note，不得自動改寫 Queue 價格或週期。
 

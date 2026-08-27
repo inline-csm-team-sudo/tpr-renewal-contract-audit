@@ -141,20 +141,23 @@ scriptProperties = {
   ORIGINAL_TPR_SPREADSHEET_ID:'TPR',
   RENEWAL_DB_SPREADSHEET_ID:'RENEWAL',
   RSV_PLAN_REFERENCE_SPREADSHEET_ID:'TMS',
-  DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID:'DEPOSIT'
+  DEPOSIT_PLAN_REFERENCE_SPREADSHEET_ID:'DEPOSIT',
+  CHARGEBEE_IMPORT_SPREADSHEET_ID:'CHARGEBEE'
 };
 assert.strictEqual(api.openConfiguredRenewalWorkbook_().ss.getId(), productionId);
 assert.doesNotThrow(() => api.assertConfiguredSourceIds_(api.openConfiguredRenewalWorkbook_(), {
   'Original TPR Spreadsheet ID':'TPR',
   'Renewal DB Spreadsheet ID':'RENEWAL',
   'RSV Plan Reference Spreadsheet ID':'TMS',
-  'Plan Reference Spreadsheet ID':'DEPOSIT'
+  'Plan Reference Spreadsheet ID':'DEPOSIT',
+  'Chargebee Import Spreadsheet ID':'CHARGEBEE'
 }));
 assert.throws(() => api.assertConfiguredSourceIds_(api.openConfiguredRenewalWorkbook_(), {
   'Original TPR Spreadsheet ID':'WRONG',
   'Renewal DB Spreadsheet ID':'RENEWAL',
   'RSV Plan Reference Spreadsheet ID':'TMS',
-  'Plan Reference Spreadsheet ID':'DEPOSIT'
+  'Plan Reference Spreadsheet ID':'DEPOSIT',
+  'Chargebee Import Spreadsheet ID':'CHARGEBEE'
 }), /source identity preflight failed/);
 
 scriptProperties.TARGET_WORKBOOK_ID = api.validatedTestWorkbookId;

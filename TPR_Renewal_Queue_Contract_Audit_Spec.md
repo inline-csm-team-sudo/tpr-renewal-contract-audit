@@ -24,12 +24,13 @@
 | 原始 TPR | 選取分店、舊方案、Demand、Comment、合約連結、後段更新欄位來源 | 唯讀 |
 | Renewal DB | 續約月份及新方案資料來源 | 唯讀 |
 | 方案參照表 | 公版、BD 新方案、訂金方案與方案家族判斷來源 | 唯讀 |
+| Chargebee Import Master Sheets / TW | 本批 Branch Tax ID snapshot 來源 | 永久唯讀 |
 | Audit 工作簿 | Control、設定表、Queue、快照、覆核表、Audit Log | 只可寫目前環境明確指定的 workbook |
 
 目前測試工作表 ID：`1ziGxJPwHpKAG8k6wVTQ8EobadNcEkE1RiJ4Eq9ZROw4`。
 
 Production target 不得硬編碼。Apps Script 必須以 `ENVIRONMENT`、`TARGET_WORKBOOK_ID`、
-`EXPECTED_WORKBOOK_NAME` 與四個 source ID Script Properties 做首次寫入前的 fail-closed identity check。
+`EXPECTED_WORKBOOK_NAME` 與五個 source ID Script Properties 做首次寫入前的 fail-closed identity check。
 `buildQueue()` 只建立 Queue 與 review schemas；Review Batch 與 current-batch rows 由後續明確 action 建立，
 不得產生 blank-batch historical rows。
 
@@ -228,17 +229,20 @@ Share／多店合約必須先依文件店別方案列建立各 Branch 的 docume
 
 ### 7.3 Share Plan
 
-若 Queue 有 `Share Plan ID`，`Share Group Review` 必須確認：
+若 Queue 有 `Share Plan ID`，Share Contract Audit 只以 current Queue、current-batch Structured Contract
+Data、current-batch `Branch Tax ID Reference` 與 structured-document overage 為 runtime authority。
+Renewal DB 完整群組不負責判斷本批是否漏續約。
 
-- 完整成員店家
-- 統編
-- 合約期間
-- 超額條件
-- 覆核狀態
+每份 relevant evidence 只讀一次並保存完整 document coverage manifest；同 Share ID 可由多份合約的
+coverage union 共同覆蓋。Document Share ID 必須等於 Queue Share ID，且 coverage union 必須與 current
+Queue member set exact match。文件多店或 Queue 多店都 fail closed 並列出具體 Branch，不推論漏續約。
 
-AI 覆核時應以 Share Plan ID 為單位一次處理整組，不得等使用者逐店指出。若同一份合約附件已列出完整成員、公司統編、各店期間、價格與超額條件，應直接回填一次 `Share Group Review`，並把結果套用到該 Share ID 的全部 Queue 分店。
+Batch preparation 從唯讀 Chargebee TW 依本批 Branch ID 建立 Tax ID snapshot；Final Audit 不再讀原表。
+同組 Tax ID 相同可自動 Pass，不同統編進人工例外確認。Overage 直接比較 Queue 與 current structured
+document facts。Member/Coverage、Tax ID、Contract、Overage 四項共同派生 Status，不要求人工重填第五個
+Status Pass。Branch-level plan／price／bonus／annual／Deposit mismatch 不得污染同組其他 Branch。
 
-任一項未確認，該 Share Plan 所屬分店不可通過。
+任一必要 input 缺失、ambiguous 或無法唯一 mapping 時，該 Share Plan 不可通過。
 
 ### 7.4 贈送組數合理性
 

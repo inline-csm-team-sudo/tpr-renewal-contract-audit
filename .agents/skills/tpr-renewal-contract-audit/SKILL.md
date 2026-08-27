@@ -43,15 +43,24 @@ When the user says「從頭跑一次續約流程」or equivalent:
 4. Confirm the Queue preserves TPR identity and context fields and replaces only renewal-plan fields.
 5. Explicitly create a new Review Batch after Queue build, then build one Branch-level review set from all
    Queue product rows for that Branch ID. Every current-batch Branch must have exactly one Contract
-   Evidence and one Plan Classification identity row before extraction starts.
+   Evidence and one Plan Classification identity row before extraction starts. Batch preparation must also
+   read the configured Chargebee `TW` source without mutation and snapshot the current Queue Branch IDs'
+   string Tax IDs into `Branch Tax ID Reference`; Final Audit reads this current-batch snapshot only.
 6. Open every contract, email, image, or folder linked by the selected branches and inventory the complete relevant evidence set for each Branch.
 7. For PDFs or photographs, inspect every relevant page visually; OCR or extracted text is only an aid.
 8. Before freezing Structured Contract Data, complete the evidence checklist for every Branch: inspect every relevant signature/seal page (including page 2, the final page and relevant folder attachments), locate explicit consent or designated written agreement evidence, confirm the renewal period, and preserve annual-payment amount plus quote/location or a document-only derivation with provenance. Text extraction alone cannot close a visual seal/signature field; run the field-local visual fallback defined by `references/structured-extraction.md` whenever the field requires visual evidence.
 9. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.
-10. Complete Contract Evidence, Plan Classification, Special Approval, and Share Group reviews.
-11. Decide each Branch using all products together, then write the same decision to every Queue product row for that Branch.
-12. Write `Check=TRUE` only when every required check passes. Otherwise write `FALSE` and a concrete, one-line Note containing actual values and the required next action.
-13. Verify counts, ensure every unchecked row has a nonblank Note, append Audit Log, and visually inspect the Queue.
+10. For every current Queue Share Plan, preserve document-level Share coverage manifests while reading each
+    relevant evidence file only once. Run the mandatory deterministic Share workflow: Queue Share ID versus
+    document Share ID; union of document-covered members versus the current Queue member set; current-batch
+    `Branch Tax ID Reference`; and Queue versus structured-document overage. Derive Share Status from those
+    four checks. Do not use Renewal DB's full Share member set as a runtime gate, require five manual Pass
+    fields, or let one Branch's product mismatch fail another Branch's Share check. Missing or ambiguous
+    input fails closed; only genuine cross-Tax-ID or evidence exceptions enter manual review.
+11. Complete Contract Evidence, Plan Classification, Special Approval, and unresolved Share exception reviews.
+12. Decide each Branch using all products together, then write the same decision to every Queue product row for that Branch.
+13. Write `Check=TRUE` only when every required check passes. Otherwise write `FALSE` and a concrete, one-line Note containing actual values and the required next action.
+14. Verify counts, ensure every unchecked row has a nonblank Note, append Audit Log, and visually inspect the Queue.
 
 Running the Apps Script audit alone is not a completed review. Codex must read the linked evidence, confirm the Branch's complete relevant evidence set, and fill the review facts before final Check decisions. Once structured mode is enabled, missing or invalid structured data is `NEEDS_REVIEW` and must never fall back to a legacy manual TRUE.
 
@@ -66,6 +75,10 @@ Running the Apps Script audit alone is not a completed review. Codex must read t
 - Extraction safety is ordered `correct Confirmed` first, `Ambiguous` or `Unreadable` second, and guessed `Confirmed` last. A completed extraction has zero wrong-Confirmed fields; first-pass usability never justifies guessing.
 - Normal passing products do not require page, location, or raw text. Preserve a source locator for mismatches, unreadable or ambiguous fields, bonus values, annual totals, Deposit rates, consent, seals, special evidence, or other manual-review exceptions when available.
 - Never mark seals, consent, restaurant name, period, or plan as confirmed merely because a file exists.
+- For Share evidence, extract `share_plan_id` plus the complete document-covered member manifest with
+  restaurant names, reliably mapped Branch IDs, and source provenance. Reuse a manifest for every covered
+  Branch instead of rereading the file. If a restaurant name cannot map uniquely to an authoritative Branch
+  ID, leave it Ambiguous and fail closed; never infer membership from Queue or a production case name.
 
 ## Decision discipline
 
@@ -73,6 +86,10 @@ Running the Apps Script audit alone is not a completed review. Codex must read t
 - Do not replace a concrete discrepancy with a generic phrase such as「方案有變更，需人工確認」.
 - Distinguish Queue product-row counts from unique Branch counts in the final report.
 - Preserve independent decisions for different Branch IDs even when they share one group contract.
+- Share Contract Audit authority is the current Queue, current-batch structured Share manifests, current-batch
+  `Branch Tax ID Reference`, and structured-document overage. Renewal DB full-group membership and historical
+  Test/manual review rows are not runtime authorities. Every required Share input and check must be present;
+  silent skip or fallback is prohibited.
 - Within one Branch ID, apply the Branch decision consistently to all of its product rows.
 - Do not treat a previously checked Queue row as proof; rebuild the judgment from current sources and evidence.
 

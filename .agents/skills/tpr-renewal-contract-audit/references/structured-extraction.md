@@ -140,6 +140,59 @@ buy-in 與 Queue 均可唯一配對，Document Match 可以是 `MATCH`；目前�
 `depositCommissionAudit_()` 仍可在 Final Check 階段要求人工 Review。Extraction 不預先產生
 `NEEDS_REVIEW`，也不改變該 protected policy。
 
+## Share document coverage manifest
+
+Share extraction 必須保存 document／evidence-level 的完整 coverage，不能只留下目前 Branch 的
+`contract_evidence.restaurant_name` projection。每份 relevant evidence 只讀一次，建立一個可被多個
+Branch structured rows 共同引用、以 `manifest_id` 去重的 provider-neutral manifest：
+
+- `source_id`：必須存在於 `evidence_set.relevant_source_ids`。
+- `share_plan_id`：只由文件明示的 Share ID 建立 field-state object；合約必須明確提到 Share ID。
+- `coverage_complete`：只有完整檢查該 evidence 的成員表、店名範圍、附件與註腳後才可
+  `Confirmed(true)`。
+- `covered_members`：保存文件列出的完整店名集合；每個 member 保存 `restaurant_name`、
+  `branch_id` 與 mapping provenance。
+- `provenance`：保存 source ID 與 page／table／section locator；例外另保留 quote。
+
+同一 Share ID 可以由多份合約覆蓋；reader 各自建立 manifest，Audit 再取 current relevant evidence
+coverage 的 union。不得要求每份文件單獨涵蓋整組。若同一份文件涵蓋多店，先讀一次完整文件，之後
+讓各 covered Branch 引用同一 manifest；不得為每店重複 reader extraction。
+
+Branch ID 不要求出現在合約文字中。只有文件餐廳名稱可透過 authoritative Branch mapping 唯一對應時，
+才可將 `branch_id` 設為 `Confirmed`，並保存 mapping provenance。名稱有多個可能、找不到唯一 mapping、
+或文件文字不清時，分別使用 `Ambiguous`／`Unreadable`；不得利用 Queue 預期成員、Renewal DB 完整群組、
+歷史 review 或已知 Production 店名猜 Branch ID。
+
+建議形狀：
+
+```json
+{
+  "share_coverage_manifests": [
+    {
+      "manifest_id": "drive-file-id#share-members",
+      "source_id": "drive-file-id",
+      "share_plan_id": {"state":"Confirmed","value":"GROUP-ID"},
+      "coverage_complete": {"state":"Confirmed","value":true},
+      "covered_members": [
+        {
+          "restaurant_name": {"state":"Confirmed","value":"Restaurant A"},
+          "branch_id": {"state":"Confirmed","value":"branch-a"},
+          "mapping_provenance": {
+            "source_id":"drive-file-id",
+            "method":"document restaurant name → authoritative Branch mapping"
+          }
+        }
+      ],
+      "provenance": {"source_id":"drive-file-id","locator":"page 1 / Share member table"}
+    }
+  ]
+}
+```
+
+Share manifest 只陳述文件 facts，不輸出 PASS／FAIL。下列情況保留 field uncertainty 並交 deterministic
+Audit fail closed：Share ID 不清、coverage 是否完整不清、restaurant-to-Branch mapping 不唯一、或 relevant
+evidence 無法完整讀取。
+
 ## Product field semantics
 
 每個 product row 都要有 `source_id`，且必須屬於 `evidence_set.relevant_source_ids`。
@@ -293,6 +346,7 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
       "overage_unit_price": {"state":"Confirmed","value":7}
     }
   ],
+  "share_coverage_manifests": [],
   "contract_evidence": {},
   "fallback_requests": []
 }
@@ -309,6 +363,13 @@ You are a document-fact extractor. Return only valid JSON conforming to schema v
 Inventory the complete relevant evidence set, inspect every relevant page, establish product-row
 boundaries, and output one canonical row per document product. Work in this order: product comparison
 fields; restaurant, period, and annual total; then visual seal, signature, and consent evidence.
+
+When any document product has a Share Plan ID, extract every current relevant evidence file's complete
+document-level Share coverage manifest. The document must supply the Share ID. Preserve all covered
+restaurant names and map a Branch ID only when authoritative mapping is unique, with provenance. One file
+is read once and one manifest is reused across its covered Branches; multiple files for one Share ID remain
+separate manifests whose member sets can later be unioned. Do not project the document down to only the
+current Branch, infer a Branch ID from Queue or Renewal DB group membership, or output a Share verdict.
 
 Use only RSV, RwG, Deposit, Deposit-Commission, Voice, Survey, or eCoupon when product.state is
 Confirmed. Split Deposit fixed fees from every Deposit-Commission payment method or rate. Preserve

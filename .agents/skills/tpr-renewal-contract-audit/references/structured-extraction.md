@@ -178,12 +178,38 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
 - `restaurant_name`：文件實際文字。換行、空白與已知 OCR 異體可另記 raw value；無法唯一確認時
   使用 `Ambiguous`。多店文件保存所有明示店名，不以 Queue 名稱覆蓋。
 - `contract_start_date`、`contract_end_date`：只比較日曆日期，輸出 `yyyy-MM-dd`，忽略時間。
-- `annual_payment_amount_ntd`：文件明載的年繳總額；不得加總 product rows 或由 Queue 回推，並保存
-  quote／locator。
+- `annual_payment_amount_ntd`：文件明載的年繳總額，或由同一 Branch 的已確認文件 product facts
+  推導的年度固定費；兩者都必須保存 quote／locator。衍生值另保存 calculation 與逐項
+  `source_product_facts`，不得由 Queue 回推。
 - `inline_seal`、`customer_seal`、`signature`：必須實際視覺檢查簽署／用印區。OCR 或檔案存在不能
   證明有或沒有；尚未視覺確認時使用 `Unreadable` 或提出 fallback。
 - `consent_evidence`：完整 email thread 的實際同意文字、sender 與 locator；信件檔案存在不等於
   已同意。
+
+### Evidence completeness and field-local visual fallback
+
+- **Dual seal / signature：**每個 relevant PDF、增補協議與 folder attachment 都要檢查實際簽署／
+  用印頁，至少包含第 2 頁、末頁與被拆成獨立檔案的 signature attachment。OCR／文字層沒有印章文字
+  不能判為 `NotMentioned`。只有目視確認實際圖像後，才可用 `verification="visual"` 將
+  `inline_seal`／`customer_seal` 設為 `Confirmed(true)`；未能可靠檢視時使用 `Unreadable`／
+  `Ambiguous` 並提出該欄位的 visual fallback，不重跑無關產品 extraction。
+- **Consent：**完整 Email 串中客戶明確回覆「同意」或其他語意同等、明確的同意文字，可建立
+  `kind="explicit_email_consent"`；由 `inline-csm-team@inline.tw` 明確記錄雙方已就續約方案達成
+  合意並進行書面確認，可建立 `kind="agreement_confirmation"`。兩者都必須保存原文 quote、sender
+  （如適用）與 locator。模糊回覆、單純收件、請求對方同意或不完整對話不得推測為 consent。
+- **Period：**掃描／圖片文件的文字層無法可靠提供日期時，只 fallback 合約日期區域並目視確認。
+  只有年、月、日皆可可靠閱讀且為有效日曆日期時才 `Confirmed`；否則維持 `Unreadable`／
+  `Ambiguous`，不得由 Queue 的預期期間補值。
+- **Annual payment：**任何 `Confirmed` 年繳金額都必須同時具有支持該金額的 quote 與 locator。
+  文件若沒有單一總額，但同一 Branch 的產品費用均是文件中已確認的 facts，可建立
+  `derived=true` 的 document-based annual total；必須保存完整計算式、每個 source product 的
+  product／billing／price、quote、locator 與 source ID。不得使用 Queue annual 合計或 Queue 產品值
+  反推文件金額。
+- **Shared contract：**先依文件明示的 restaurant scope 建立每個 Branch 自己的 document-based
+  annual amount，再用 shared document total 作 cross-check。Group total 不得取代逐 Branch facts，也
+  不得把整組金額寫成單一 Branch 的 `annual_payment_amount_ntd`。例如每店文件 facts 為 RSV 21,600
+  與 Deposit 300／月時，每店衍生為 `21,600 + 300 × 12 = 25,200`；兩店合計 50,400 只保存為
+  `shared_total_cross_check`。
 
 建議 sidecar 形狀：
 
@@ -194,12 +220,50 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
     "contract_start_date": {"state":"Confirmed","value":"2026-09-01","source_id":"..."},
     "contract_end_date": {"state":"Confirmed","value":"2027-08-31","source_id":"..."},
     "annual_payment_amount_ntd": {
-      "state":"Confirmed","value":21600,"source_id":"...","locator":"page 2 / 給付方式"
+      "state":"Confirmed","value":21600,"source_id":"...","quote":"年繳總額 21,600 元",
+      "locator":"page 2 / 給付方式"
     },
     "inline_seal": {"state":"Confirmed","value":true,"source_id":"...","locator":"signature page"},
     "customer_seal": {"state":"Confirmed","value":true,"source_id":"...","locator":"signature page"},
     "signature": {"state":"NotApplicable"},
     "consent_evidence": {"state":"NotApplicable"}
+  }
+}
+```
+
+文件產品費用推導範例：
+
+```json
+{
+  "annual_payment_amount_ntd": {
+    "state": "Confirmed",
+    "value": 25200,
+    "derived": true,
+    "derivation": {
+      "calculation": "RSV 21600 + Deposit 300 × 12 = 25200",
+      "source_product_facts": [
+        {
+          "source_id": "signed-contract",
+          "quote": "RSV 年費 21,600 元",
+          "locator": "page 1 / 店別方案列",
+          "product": {"state":"Confirmed","value":"RSV"},
+          "billing_period": {"state":"Confirmed","value":"annual"},
+          "price": {"state":"Confirmed","value":21600}
+        },
+        {
+          "source_id": "signed-contract",
+          "quote": "Deposit 月費 300 元",
+          "locator": "page 1 / 店別方案列",
+          "product": {"state":"Confirmed","value":"Deposit"},
+          "billing_period": {"state":"Confirmed","value":"monthly"},
+          "price": {"state":"Confirmed","value":300}
+        }
+      ],
+      "shared_total_cross_check": {
+        "state":"Confirmed","value":50400,"source_id":"signed-contract",
+        "quote":"兩店合計 50,400 元","locator":"page 1 / 總額"
+      }
+    }
   }
 }
 ```

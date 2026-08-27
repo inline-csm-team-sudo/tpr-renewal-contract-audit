@@ -139,7 +139,7 @@ RwG structured comparison／normalization 暫不屬本次自動化優化範圍�
 
 續約 Queue 的預設輸出為：RSV 為 annual 時，正費用 add-on 也正規化為 annual，金額為月費 × 12。這個單向正規化不視為換方案。
 
-覆核者必須從合約／完整信件串逐字擷取文件明載的年繳總額，並記錄原文與位置。`Annual Payment Amount (NTD)` 不得由 Queue 加總回推。程式只比較：
+覆核者必須從合約／完整信件串擷取文件明載的年繳總額，並記錄原文與位置。若文件沒有單一總額欄，但同一 Branch 的產品固定費均為文件內 Confirmed facts，可以從這些 document facts 推導年度總額；必須保存計算式、逐項 quote／location／source，不得由 Queue 加總回推。程式只比較：
 
 `Document annual payment amount = SUM(Queue 固定費用 rows 中 billing period = annual 的合約價格)`
 
@@ -151,7 +151,7 @@ RSV annual 但正費用 add-on 續約後仍為 monthly 時，是 split-billing �
 
 若 Queue 沒有任何正費用附加服務（只有主產品，或附加服務價格皆為 0），年繳總額不再是判斷附加服務付款週期的必要欄位，不得因未填入該欄而阻擋案件。若合約明載「加值服務：無」，應直接視為無附加服務歧義。
 
-Share Plan 的整份合約總額必須用合約附件所列的完整成員合計核對。例如 10 店各 24,000 元，合約總年繳 240,000 元，應判定為整組一致；不得把 240,000 元逐店與單店 24,000 元比較。`Annual Payment Amount (NTD)` 可記錄整組總額，並在 `Billing Cycle Match` 註明成員數、單店金額與合計算式。
+Share／多店合約必須先依文件店別方案列建立各 Branch 的 document-based annual amount，再用完整成員合計核對 group total。例如 10 店各 24,000 元、合約總年繳 240,000 元時，每個 Branch 的 `Annual Payment Amount (NTD)` 仍是 24,000；240,000 只作 shared total cross-check，不得取代單店證據或逐店寫入。
 
 ### 6.3.1 PDF／信件文字正規化
 
@@ -287,6 +287,8 @@ Document Match writer 只能依 index 傳遞的 `targetRowNumber`、Review Batch
 Schema 必須包含 `evidence_set.state`、`complete` 與 `relevant_source_ids`。`complete=true` 代表已盤點該 Branch 的完整 relevant evidence set，不是只讀完單一 PDF。Folder 不要求每個檔案都做完整產品 extraction，但必須先辨識全部 relevant files；無法確認完整性時標記 `Ambiguous` 並回傳 `NEEDS_REVIEW`。
 
 每個文件產品至少保存 Product、Billing Period、Usage Sets、Bonus Sets、Price、Share Plan ID、Overage Method／Unit Price，以及 Deposit 類實際適用的 Type、Setup Fee、Commission Rate／Buy-in Price。每個 comparison field 使用 `Confirmed`、`NotMentioned`、`Unreadable`、`Ambiguous` 或 `NotApplicable`；正常 match 不強制 page、location 或 raw text。程式以完整 multiset 比較 Queue，產品多出、缺少、duplicate 數量或任何適用欄位不同都不得通過。`Deposit-Commission` 僅用於 B2C，是逐筆交易費率產品；其 `billing_period` 固定為 `NotApplicable` 且不參與 Document Comparison，不得由 Queue、主產品或年繳總額猜成 monthly／annual。其 canonical product、payment method／deposit type、commission rate／buy-in price 與產品列數仍須精確一致。B2B 的交易服務費文字依既有 B2B／Deposit 欄位語意處理，不建立 `Deposit-Commission`。固定費 Deposit 的 `monthly → annual ×12` 正規化不變。
+
+每次 structured extraction 都要完成 Contract Evidence completeness check：實際目視 relevant PDF／附件的第 2 頁、末頁與簽署頁；讀完整 Email 串確認明確同意或指定達成合意文字；掃描日期文字不可靠時只對日期區塊做 visual fallback；年繳 Amount、Quote、Location 不得缺一。OCR 沒有印章文字不等於 `NotMentioned`。只有文件本身支持的 facts 可 Confirmed，Queue expected value 不得作 extraction hint。
 
 自 `Control!Contract Date Detail Required From` 起的新覆核，必須填入 `Contract Start Date` 與 `Contract End Date`。程式會將文件、Queue 與 Renewal DB 日期正規化為 `yyyy-MM-dd` 後只比較年月日，不再只依賴人工填寫的 `Contract Period Match`，也不以時、分、秒差異判定不一致。
 

@@ -49,6 +49,12 @@ When the user says「從頭跑一次續約流程」or equivalent:
 6. Open every contract, email, image, or folder linked by the selected branches and inventory the complete relevant evidence set for each Branch.
 7. For PDFs or photographs, inspect every relevant page visually; OCR or extracted text is only an aid.
 8. Before freezing Structured Contract Data, complete the evidence checklist for every Branch: inspect every relevant signature/seal page (including page 2, the final page and relevant folder attachments), locate explicit consent or designated written agreement evidence, confirm the renewal period, and preserve annual-payment amount plus quote/location or a document-only derivation with provenance. Text extraction alone cannot close a visual seal/signature field; run the field-local visual fallback defined by `references/structured-extraction.md` whenever the field requires visual evidence.
+   For each relevant agreement, decide seal presence and each seal's owner separately. Attribute inline/customer
+   ownership only from the stamp text, signing-field labels, party names and their visual association within that
+   agreement; page position or a nearby printed name alone is insufficient. Never borrow a seal from a different
+   agreement or section in the same PDF. If a seal is visible but its owner cannot be established, record
+   `Ambiguous` / `NEEDS_REVIEW`, not `Confirmed(true)` for either party. Preserve source, page, section and a
+   visual description supporting each Confirmed seal fact (including a visually confirmed absence).
 9. For a new structured review, follow `references/structured-extraction.md`, set `Structured Review Version=1`, and write provider-neutral `Structured Contract Data` containing the confirmed evidence set plus one structured object per document product. Freeze the document extraction before reading Queue plan values. Do not write `Document Match Result` or `Document Match Detail`; Apps Script calculates those fields. Do not use legacy `Full Plan Match` in structured mode; `Manual Plan Veto` is optional and only explicit text tokens defined by the authoritative reference can veto a calculated MATCH.
    Apply the permanent product-field matrix: Survey and Voice compare only subscription fee and billing
    period; entitlement wording such as unlimited survey sends or phone/SMS usage is preserved as an

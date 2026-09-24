@@ -172,6 +172,55 @@ dualSealLocations.forEach(locator => {
   assert.strictEqual(population.errors.length, 0, locator);
 });
 
+// Seal-owner regression fixtures encode visual observations, not Queue values.
+// The document reader owns attribution; this checks the provider-neutral facts
+// retain separate party outcomes and agreement-scoped provenance on population.
+const sealAttributionRules = fs.readFileSync(
+  '.agents/skills/tpr-renewal-contract-audit/references/structured-extraction.md', 'utf8');
+assert.match(sealAttributionRules, /Seal attribution \/ agreement isolation/);
+assert.match(sealAttributionRules, /印章本身可辨識的文字/);
+assert.match(sealAttributionRules, /不可跨 section 借用/);
+assert.match(sealAttributionRules, /不得只憑左／右位置/);
+const sealAttributionFixtures = [
+  { name:'customer seal only beside printed inline name', inline:false, customer:true,
+    observation:'續約用印區的客戶公司章可讀；旁邊只有印出的 inline 公司名稱，沒有 inline 印章' },
+  { name:'inline seal only', inline:true, customer:false,
+    observation:'續約用印區的 inline 公司章可讀；客戶簽署欄空白' },
+  { name:'both attributable seals', inline:true, customer:true,
+    observation:'續約用印區兩枚章文字分別對應 inline 與客戶簽署欄' },
+  { name:'visible seal with ambiguous owner', inline:null, customer:null,
+    observation:'續約用印區有章，但章文字及簽署欄不足以辨識所有人' },
+  { name:'transfer agreement seal cannot fill renewal agreement', inline:false, customer:true,
+    observation:'續約用印區只有客戶章；另一份移轉協議的 inline 章不屬於本續約 section' },
+  { name:'reversed left-right layout', inline:true, customer:true,
+    observation:'inline 章位於左側、客戶章位於右側，章文字與各自簽署欄可辨' }
+];
+sealAttributionFixtures.forEach(fixture => {
+  const sealFact = (value, party) => value === null
+    ? { state:'Ambiguous', source_id:'RENEWAL_FILE', page:2,
+        locator:'renewal agreement / signature block', verification:'visual',
+        visual_description:fixture.observation }
+    : { state:'Confirmed', value, source_id:'RENEWAL_FILE', page:2,
+        locator:'renewal agreement / signature block', verification:'visual',
+        visual_description:`${party}: ${fixture.observation}` };
+  const facts = {
+    inline_seal:sealFact(fixture.inline, 'inline'),
+    customer_seal:sealFact(fixture.customer, 'customer')
+  };
+  for (const party of ['inline_seal', 'customer_seal']) {
+    assert.strictEqual(facts[party].source_id, 'RENEWAL_FILE', fixture.name);
+    assert.match(facts[party].locator, /renewal agreement/, fixture.name);
+    assert.ok(facts[party].visual_description, fixture.name);
+  }
+  const result = api.structuredContractEvidencePopulation_(
+    evidenceData(facts, ['RENEWAL_FILE']));
+  assert.strictEqual(result.fields['Inline Seal'],
+    fixture.inline === null ? undefined : fixture.inline, fixture.name);
+  assert.strictEqual(result.fields['Customer Seal'],
+    fixture.customer === null ? undefined : fixture.customer, fixture.name);
+  assert.strictEqual(result.errors.length, 0, fixture.name);
+});
+
 // OCR blank or a text-only inference never confirms a visual seal.
 ['NotMentioned', 'Unreadable', 'Ambiguous'].forEach(state => {
   const population = api.structuredContractEvidencePopulation_(evidenceData({

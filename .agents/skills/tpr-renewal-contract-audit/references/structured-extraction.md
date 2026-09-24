@@ -264,6 +264,27 @@ Structured Contract Data 可保留下列 provider-neutral sidecar facts；Apps S
   不能判為 `NotMentioned`。只有目視確認實際圖像後，才可用 `verification="visual"` 將
   `inline_seal`／`customer_seal` 設為 `Confirmed(true)`；未能可靠檢視時使用 `Unreadable`／
   `Ambiguous` 並提出該欄位的 visual fallback，不重跑無關產品 extraction。
+- **Seal attribution / agreement isolation：**先判斷相關 agreement 的用印區是否有印章，再分別判斷
+  每個印章的 owner 是 inline、customer 或無法確認。必須綜合印章本身可辨識的文字／公司名稱、簽署
+  欄位標籤、印章與當事人名稱的視覺關聯，以及目前 section／document type；不得只憑左／右位置、
+  附近印有某公司名稱或同一 PDF 其他獨立協議的印章推定 owner。續約文件與移轉協議即使合併為
+  一個 PDF，印章證據也不可跨 section 借用。可確認有印章但 owner 不明時，相關 party seal 為
+  `Ambiguous` 並使該項 `NEEDS_REVIEW`，不得猜成任一方的 `Confirmed(true)`。
+  `Confirmed(true)` 必須附 `source_id`、page、agreement/section locator、`verification="visual"` 與
+  `visual_description`，說明印章文字及如何對應當事人。完整目視相關用印區後若確認某方未用印，
+  才能給該方 `Confirmed(false)`，並同樣保存 source、page、section 與目視描述；無法可靠確認
+  缺席時應為 `Unreadable`／`Ambiguous`，不能由 OCR 空白或另一方有章推論。
+
+  Generic seal-attribution regression cases（只根據文件，不使用 Queue 或 Branch 名稱）：
+
+  | 續約 agreement 的目視事實 | inline_seal | customer_seal |
+  | --- | --- | --- |
+  | 只有 customer 公司章，旁邊印有 inline 公司名稱但未用印 | `Confirmed(false)` | `Confirmed(true)` |
+  | 只有可歸屬 inline 的章 | `Confirmed(true)` | `Confirmed(false)` |
+  | 雙方各有可歸屬的章 | `Confirmed(true)` | `Confirmed(true)` |
+  | 有章但文字／欄位不足以判 owner | `Ambiguous` | `Ambiguous` |
+  | 續約文件只見 customer 章；同 PDF 的另一份移轉協議有 inline 章 | `Confirmed(false)` | `Confirmed(true)` |
+  | 左右位置對調，但章文字與簽署欄位仍可歸屬雙方 | `Confirmed(true)` | `Confirmed(true)` |
 - **Consent：**完整 Email 串中客戶明確回覆「同意」或其他語意同等、明確的同意文字，可建立
   `kind="explicit_email_consent"`；由 `inline-csm-team@inline.tw` 明確記錄雙方已就續約方案達成
   合意並進行書面確認，可建立 `kind="agreement_confirmation"`。兩者都必須保存原文 quote、sender

@@ -533,6 +533,14 @@ function prepareQueueWriteSurface_(sheet, headers) {
 
 function queueWriteCellToken_(value, header, timeZone) {
   if (value === '' || value === null || value === undefined) return 'blank';
+  // Persistence comparison only: auditText_ serializes seals, but Sheets may return booleans.
+  // Do not coerce Check, policy/status tokens, missing values, or immutable source fields.
+  if (['Inline Seal', 'Customer Seal'].map(norm_).indexOf(norm_(header)) >= 0) {
+    if (typeof value === 'boolean') return 'boolean:' + value;
+    if (typeof value === 'string' && /^(true|false)$/i.test(value)) {
+      return 'boolean:' + value.toLowerCase();
+    }
+  }
   if (norm_(header).indexOf(norm_('合約起始日')) === 0 ||
       norm_(header).indexOf(norm_('合約結束日')) === 0) {
     const date = dateOnlyText_(value, timeZone);

@@ -33,7 +33,7 @@ const hidden = [11, 12, ...Array.from({ length: 41 }, (_, i) => i + 16)];
 const copy = value => value instanceof Date ? new Date(value) : value;
 
 class Sheet {
-  constructor({ filter = true, manual = false, corrupt = null } = {}) {
+  constructor({ filter = true, manual = false, corrupt = null, coerceBooleanLiterals = false } = {}) {
     this.cells = Array.from({ length: 233 }, () => Array(headers.length).fill(''));
     this.rules = Array.from({ length: 233 }, () => Array(headers.length).fill(null));
     this.cells[0] = headers.slice();
@@ -42,6 +42,7 @@ class Sheet {
     this.manual = manual ? new Set(hidden) : new Set();
     this.filter = filter ? { remove: () => { this.filter = null; this.filtered.clear(); } } : null;
     this.corrupt = corrupt;
+    this.coerceBooleanLiterals = coerceBooleanLiterals;
     this.writes = 0;
     this.insertCheckboxCalls = 0;
   }
@@ -67,7 +68,11 @@ class Sheet {
       setValues(values) {
         sheet.writes++;
         each((r, c) => {
-          const value = values[r - row + 1][c - col + 1];
+          let value = values[r - row + 1][c - col + 1];
+          // Emulate the literal string -> boolean read-back observed in the Test runtime.
+          if (sheet.coerceBooleanLiterals && typeof value === 'string' && /^(true|false)$/i.test(value)) {
+            value = value.toLowerCase() === 'true';
+          }
           // Inject the observed filter-hidden date-loss fault, not a claim about all Sheets writes.
           sheet.cells[r][c] = value === null || value === undefined || (sheet.filtered.has(r + 1) && value instanceof Date) ? '' : copy(value);
         });
@@ -130,6 +135,54 @@ assert.strictEqual(auditSheet.insertCheckboxCalls, 0, 'validation must never res
 assert.strictEqual(auditSheet.rules.slice(5).filter(r => r[1]).length, 0);
 assert.strictEqual(auditSheet.getFilter(), null);
 
+// Audit serializes seal facts through auditText_; Sheets may persist those literals as booleans.
+const sealHeaders = headers.concat(['Inline Seal', 'Customer Seal', 'Plan Change', 'Special Approval Required']);
+const sealBefore = rows.slice(0, 2).map(r => r.concat(['', '', '', '']));
+const sealResults = sealBefore.map((r, i) => {
+  const output = r.slice();
+  output[1] = i === 0;
+  output[2] = 'Generic audit outcome';
+  output[headers.length] = i === 0 ? 'true' : 'FALSE';
+  output[headers.length + 1] = i === 0 ? 'false' : 'TRUE';
+  output[headers.length + 2] = 'No';
+  output[headers.length + 3] = 'Yes';
+  return output;
+});
+const sealSheet = new Sheet({ coerceBooleanLiterals: true });
+sealSheet.cells.forEach(r => r.push('', '', '', ''));
+sealSheet.rules.forEach(r => r.push(null, null, null, null));
+sealSheet.cells[0] = sealHeaders.slice();
+assert.doesNotThrow(() => api('writeQueueAuditResults_')(sealSheet, sealHeaders, sealBefore, sealResults),
+  'seal-only literal boolean coercion must not falsely fail the real Audit integrity guard');
+assert.deepStrictEqual(sealSheet.cells.slice(1, 3).map(r => r.slice(headers.length, headers.length + 2)),
+  [[true, false], [false, true]]);
+assert.deepStrictEqual(sealSheet.cells.slice(1, 3).map(r => r[1]), [true, false]);
+assert.strictEqual(sealSheet.writes, 1, 'normalization must not trigger a retry or corrective write');
+
+const token = (value, header) => api('queueWriteCellToken_')(value, header, 'Asia/Taipei');
+for (const header of ['Inline Seal', 'Customer Seal']) {
+  for (const [literal, boolean] of [['true', true], ['TRUE', true], ['false', false], ['FALSE', false]]) {
+    assert.strictEqual(token(literal, header), token(boolean, header));
+  }
+  assert.notStrictEqual(token(true, header), token(false, header));
+  for (const value of ['', null, undefined, 0, 1, '0', '1', 'Pass', 'Yes', 'No', 'Ambiguous', 'Unreadable', ' true ']) {
+    assert.notStrictEqual(token(value, header), token(true, header));
+    assert.notStrictEqual(token(value, header), token(false, header));
+  }
+}
+// No blanket coercion for Check, other outputs, manual-veto input, or immutable base fields.
+for (const header of ['Check', 'Plan Change', 'Special Approval Required', 'Contract Check', 'Update Status',
+  'Document Match Result', 'Document Match Detail', 'Note', 'Manual Plan Veto', 'Full Plan Match',
+  'Branch ID', '合約價格', 'Inline Seal backup']) {
+  assert.notStrictEqual(token('true', header), token(true, header));
+  assert.notStrictEqual(token('false', header), token(false, header));
+}
+for (const [field, replacement] of [['Inline Seal', false], ['Customer Seal', ''], ['Check', 'TRUE'], ['Plan Change', true]]) {
+  sealSheet.corrupt = sheet => { sheet.cells[1][sealHeaders.indexOf(field)] = replacement; };
+  assert.throws(() => api('writeQueueAuditResults_')(sealSheet, sealHeaders, sealBefore, sealResults),
+    new RegExp(`row 2.*${field}`), 'real value changes must still fail closed');
+}
+
 // Silent post-write faults must fail closed, with no retries or corrective writes.
 for (const field of ['合約起始日', '合約價格', 'Branch ID', 'Original TPR Row']) {
   const column = headers.indexOf(field);
@@ -165,6 +218,6 @@ api('assertDocumentMatchTraceReadBack_')(null, []);
 // Guards remain at both completion boundaries; no diagnostic-only hook is required.
 assert.match(source, /assertQueueWriteIntegrity_\(queue, queueHeaders, output, 'Build completion'\)/);
 assert.match(source, /writeQueueAuditResults_\(queue, queueHeaders, queueValues\.slice\(1\), resultRows\)/);
-console.log('PASS Queue writer integrity: 55-row filter fault, tail validation, checkbox preservation, fail-closed guards');
+console.log('PASS Queue writer integrity: 55-row filter fault, tail validation, checkbox preservation, seal-only boolean normalization, fail-closed guards');
 
 module.exports = { Sheet, headers, rows, context };

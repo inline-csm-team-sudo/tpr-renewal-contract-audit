@@ -372,6 +372,7 @@ function buildQueueWithMode_(dryRun) {
   }
   writeQueue_(queue, queueHeaders, output, queueIndex);
   setupAuditSheets_(ss, queue);
+  assertQueueWriteIntegrity_(queue, queueHeaders, output, 'Build completion');
   appendAudit_(ss.getSheetByName('Audit Log'), batchId, monthLabel, output.length, missingTpr, missingRenewal);
   notify_(
     'Queue built: ' + output.length + ' product rows across ' + monthLabel + '.\n' +
@@ -494,6 +495,7 @@ function resolvePlan_(newPeriod, rules) {
 }
 
 function writeQueue_(sheet, headers, rows, ix) {
+  prepareQueueWriteSurface_(sheet, headers);
   sheet.getRange(1, 1, sheet.getMaxRows(), headers.length).clearContent();
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   if (rows.length) sheet.getRange(2, 1, rows.length, headers.length)
@@ -504,12 +506,135 @@ function writeQueue_(sheet, headers, rows, ix) {
   const bonus = requiredHeader_(ix, '合約贈送組數', 'Queue', true) + 1;
   const overage = requiredHeader_(ix, '超額每組單價', 'Queue', true) + 1;
   if (rows.length) {
-    sheet.getRange(2, check, rows.length, 1).clearDataValidations().insertCheckboxes();
+    sheet.getRange(2, check, rows.length, 1)
+      .setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
     sheet.getRange(2, contractStart, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sheet.getRange(2, contractEnd, rows.length, 1).setNumberFormat('yyyy-mm-dd');
     sheet.getRange(2, bonus, rows.length, 1).setNumberFormat('0.00');
     sheet.getRange(2, overage, rows.length, 1).setNumberFormat('0.000');
   }
+  assertQueueWriteIntegrity_(sheet, headers, rows, 'Build writer');
+}
+
+// Queue presentation and persistence only. Never filter business inputs or reset Check values.
+function prepareQueueWriteSurface_(sheet, headers) {
+  const filter = sheet.getFilter();
+  if (filter) {
+    filter.remove();
+    SpreadsheetApp.flush();
+  }
+  const check = requiredHeader_(headerIndex_(headers), 'Check', 'Queue') + 1;
+  const count = sheet.getMaxRows() - 1;
+  if (count > 0) {
+    sheet.showRows(2, count);
+    sheet.getRange(2, check, count, 1).clearDataValidations();
+  }
+}
+
+function queueWriteCellToken_(value, header, timeZone) {
+  if (value === '' || value === null || value === undefined) return 'blank';
+  if (norm_(header).indexOf(norm_('合約起始日')) === 0 ||
+      norm_(header).indexOf(norm_('合約結束日')) === 0) {
+    const date = dateOnlyText_(value, timeZone);
+    if (date) return 'date:' + date;
+  }
+  if (value instanceof Date) return 'datetime:' + value.getTime();
+  return typeof value + ':' + String(value);
+}
+
+function assertQueueWriteIntegrity_(sheet, headers, rows, phase) {
+  SpreadsheetApp.flush();
+  const ix = headerIndex_(headers);
+  const branchColumn = requiredHeader_(ix, 'Branch ID', 'Queue');
+  const checkColumn = requiredHeader_(ix, 'Check', 'Queue');
+  const timeZone = sheet.getParent().getSpreadsheetTimeZone();
+  const expected = rows.map(row => headers.map((header, column) =>
+    row[column] === undefined ? '' : row[column]));
+  const fail = (row, field, wanted, actual) => {
+    throw new Error('Queue integrity ' + phase + ' row ' + row + ' field ' + field +
+      ': expected=' + wanted + ', actual=' + actual + '. No retry or corrective write performed.');
+  };
+  if (sheet.getFilter()) fail(1, 'standard filter', 'none', 'present');
+  const actualHeaders = sheet.getRange(1, 1, 1, headers.length).getValues()[0];
+  headers.forEach((header, column) => {
+    const wanted = header === null || header === undefined ? '' : header;
+    if (actualHeaders[column] !== wanted) fail(1, header || '(blank header)', wanted, actualHeaders[column]);
+  });
+  if (rows.length) {
+    const range = sheet.getRange(2, 1, rows.length, headers.length);
+    const actual = range.getValues();
+    const displays = range.getDisplayValues();
+    const rules = sheet.getRange(2, checkColumn + 1, rows.length, 1).getDataValidations();
+    expected.forEach((row, index) => {
+      if (!auditText_(row[branchColumn])) fail(index + 2, 'Branch ID', 'nonblank current identity', 'blank');
+      if (sheet.isRowHiddenByFilter(index + 2) || sheet.isRowHiddenByUser(index + 2)) {
+        fail(index + 2, 'visibility', 'visible', 'hidden');
+      }
+      if (!rules[index][0] || rules[index][0].getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.CHECKBOX) {
+        fail(index + 2, 'Check validation', 'CHECKBOX', 'missing or different');
+      }
+      headers.forEach((header, column) => {
+        if (/^#(?:NUM!|VALUE!|N\/A|REF!|DIV\/0!|NAME\?|ERROR!|SPILL!|NULL!)/.test(displays[index][column])) {
+          fail(index + 2, header, 'no Sheets error', displays[index][column]);
+        }
+        const wanted = queueWriteCellToken_(row[column], header, timeZone);
+        const found = queueWriteCellToken_(actual[index][column], header, timeZone);
+        if (wanted !== found) fail(index + 2, header || '(blank header)', wanted, found);
+      });
+    });
+  }
+  const tailCount = sheet.getMaxRows() - rows.length - 1;
+  if (tailCount > 0) {
+    const first = rows.length + 2;
+    const checks = sheet.getRange(first, checkColumn + 1, tailCount, 1);
+    const values = checks.getValues();
+    const rules = checks.getDataValidations();
+    const branches = sheet.getRange(first, branchColumn + 1, tailCount, 1).getValues();
+    values.forEach((row, index) => {
+      if (row[0] !== '') fail(first + index, 'tail Check', 'blank', row[0]);
+      if (rules[index][0]) fail(first + index, 'tail Check validation', 'none', 'present');
+      if (auditText_(branches[index][0])) fail(first + index, 'tail Branch ID', 'blank', branches[index][0]);
+    });
+  }
+}
+
+function writeQueueAuditResults_(sheet, headers, beforeRows, resultRows) {
+  const timeZone = sheet.getParent().getSpreadsheetTimeZone();
+  const writable = ['Check', 'Note'].concat(QUEUE_AUDIT_HEADERS).map(norm_);
+  const sourceToken = row => JSON.stringify(headers.map((header, column) =>
+    writable.indexOf(norm_(header)) >= 0 ? null : queueWriteCellToken_(row[column], header, timeZone)));
+  const before = beforeRows.map(sourceToken).sort();
+  const after = resultRows.map(sourceToken).sort();
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    throw new Error('Queue Audit source fields changed in output array; zero Queue writes performed.');
+  }
+  prepareQueueWriteSurface_(sheet, headers);
+  if (resultRows.length) {
+    sheet.getRange(2, 1, resultRows.length, headers.length).setValues(resultRows);
+    const check = requiredHeader_(headerIndex_(headers), 'Check', 'Queue') + 1;
+    sheet.getRange(2, check, resultRows.length, 1)
+      .setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
+  }
+  assertQueueWriteIntegrity_(sheet, headers, resultRows, 'Audit writer');
+}
+
+function assertDocumentMatchTraceReadBack_(sheet, traces) {
+  if (!traces.length) return;
+  SpreadsheetApp.flush();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const ix = headerIndex_(headers);
+  const result = requiredHeader_(ix, 'Document Match Result', sheet.getName());
+  const detail = requiredHeader_(ix, 'Document Match Detail', sheet.getName());
+  traces.forEach(trace => {
+    const row = sheet.getRange(trace.targetRowNumber, 1, 1, headers.length).getValues()[0];
+    const expected = [trace.result, trace.detail || trace.reason || ''];
+    [result, detail].forEach((column, index) => {
+      if (row[column] !== expected[index]) {
+        throw new Error('Audit trace read-back row ' + trace.targetRowNumber + ' field ' + headers[column] +
+          ': expected=' + expected[index] + ', actual=' + row[column] + '. No corrective write performed.');
+      }
+    });
+  });
 }
 
 function appendAudit_(sheet, batchId, month, count, missingTpr, missingRenewal, operation) {
@@ -788,9 +913,8 @@ function runContractAudit() {
     activeContractReviewBatchId
   );
 
-  queue.getRange(2, 1, resultRows.length, queueHeaders.length).setValues(resultRows);
-  queue.getRange(2, requiredHeader_(qx, 'Check', 'Queue') + 1, resultRows.length, 1)
-    .clearDataValidations().insertCheckboxes();
+  assertDocumentMatchTraceReadBack_(ss.getSheetByName('Contract Evidence Review'), documentMatchTraces);
+  writeQueueAuditResults_(queue, queueHeaders, queueValues.slice(1), resultRows);
   appendAudit_(ss.getSheetByName('Audit Log'), 'AUDIT-' + Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'yyyyMMdd-HHmmss'), '', resultRows.length, [], [], 'Contract Audit');
   notify_('Contract audit completed. Ready branches: ' + readyBranches + ' / ' + Object.keys(byBranch).length +
     '. Review tabs must explicitly confirm document, plan, special approval and Share evidence before Check can be TRUE.');

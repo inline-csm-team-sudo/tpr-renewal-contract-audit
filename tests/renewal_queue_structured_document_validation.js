@@ -747,6 +747,73 @@ assert.strictEqual(
   'MATCH'
 );
 
+// deposit_type has two product-scoped domains. A category/payment-method
+// mix-up is invalid extraction, not a commercial mismatch or a matching alias.
+[
+  { document:travelDeposit, queue:travelQueue[1], invalid:['Credit Card', 'Virtual ATM'] },
+  { document:creditCardBuyIn95, queue:creditCardCommission5Queue[0], invalid:['B2B', 'B2C'] }
+].forEach(fixture => fixture.invalid.forEach(value => {
+  const invalidData = structuredData([Object.assign({}, fixture.document, {
+    deposit_type:field('Confirmed', value)
+  })]);
+  const normalized = api.normalizeStructuredDocumentProducts_(invalidData);
+  assert.ok(normalized.errors.some(error => error.includes('products[0].deposit_type')),
+    fixture.document.product.value + ' must reject deposit_type=' + value);
+  const mismatch = match(invalidData, [fixture.queue]);
+  assert.strictEqual(mismatch.result, 'NEEDS_REVIEW');
+  // Even if Queue contains the same invalid type, it cannot authorize MATCH.
+  const sameInvalidQueue = fixture.queue.slice();
+  sameInvalidQueue[headers.indexOf('超額計算方式')] = value;
+  assert.strictEqual(match(invalidData, [sameInvalidQueue]).result, 'NEEDS_REVIEW');
+}));
+
+// Extend the existing positive fixtures, retaining their output and the
+// existing case/whitespace normalization without changing document facts.
+[
+  [travelDeposit, 'b2c'],
+  [b2bDepositServiceFee5, 'b2b'],
+  [creditCardBuyIn95, 'credit card'],
+  [virtualAtmBuyIn985, 'virtual atm']
+].forEach(([document, expectedType]) => {
+  const before = JSON.stringify(document);
+  const normalized = api.normalizeStructuredDocumentProducts_(structuredData([document]));
+  assert.strictEqual(normalized.errors.length, 0);
+  assert.strictEqual(normalized.lines[0].overageMethod, expectedType);
+  const caseVariant = Object.assign({}, document, {
+    deposit_type:field('Confirmed', '  ' + expectedType.toUpperCase().replace(/ /g, '   ') + '  ')
+  });
+  assert.strictEqual(JSON.stringify(api.normalizeStructuredDocumentProducts_(
+    structuredData([caseVariant]))), JSON.stringify(normalized));
+  assert.strictEqual(JSON.stringify(document), before, 'normalization must not rewrite extraction');
+});
+const fixedDepositLine = api.normalizeStructuredDocumentProducts_(structuredData([travelDeposit])).lines[0];
+assert.strictEqual(fixedDepositLine.overagePrice, '5', 'Deposit setup_fee keeps its existing mapping');
+assert.strictEqual(fixedDepositLine.bonus, '', 'setup fee must not become commission');
+assert.strictEqual(api.normalizeStructuredDocumentProducts_(
+  structuredData([creditCardBuyIn95])).lines[0].overagePrice, '');
+
+// Unknown/empty Confirmed values are unresolved, not new aliases. Preserve
+// existing field-state handling rather than inventing a type from Queue.
+['', 'Wire Transfer', 'Credit Card / Virtual ATM'].forEach(value => {
+  assert.strictEqual(match(structuredData([travelCommission({
+    deposit_type:field('Confirmed', value)
+  })]), creditCardCommission5Queue).result, 'NEEDS_REVIEW');
+});
+['Ambiguous', 'Unreadable'].forEach(state => {
+  [travelDeposit, creditCardBuyIn95].forEach(document => {
+    assert.strictEqual(match(structuredData([Object.assign({}, document, {
+      deposit_type:field(state)
+    })])).result, 'NEEDS_REVIEW');
+  });
+});
+['NotMentioned', 'NotApplicable'].forEach(state => {
+  const normalized = api.normalizeStructuredDocumentProducts_(structuredData([
+    Object.assign({}, travelDeposit, { deposit_type:field(state) })
+  ]));
+  assert.strictEqual(normalized.errors.length, 0, 'fixed Deposit field-state compatibility');
+  assert.strictEqual(normalized.lines[0].overageMethod, '');
+});
+
 // A missing or ambiguous payment method never inherits Queue's Credit Card.
 const unknownMethodCommission5 = travelCommission({
   deposit_type:field('NotMentioned'), commission_rate:field('Confirmed', 5),

@@ -61,6 +61,9 @@ When the user says「從頭跑一次續約流程」or equivalent:
    entitlement sidecar, never as commercial usage, bonus, or overage. For B2C Deposit-Commission, preserve
    one row per payment method/rate and let Apps Script compare the exact method + normalized-commission
    multiset; multiple rates alone are not a manual-review condition.
+   Determine the canonical product before interpreting `deposit_type`: fixed `Deposit` accepts only B2B/B2C;
+   `Deposit-Commission` uses that existing field only for Credit Card/Virtual ATM. Keep creation fees in
+   `Deposit.setup_fee`; a product/type mix-up is unresolved extraction (`NEEDS_REVIEW`), not a commercial mismatch.
 10. For every current Queue Share Plan, preserve document-level Share coverage manifests while reading each
     relevant evidence file only once. Run the mandatory deterministic Share workflow: Queue Share ID versus
     document Share ID; union of document-covered members versus the current Queue member set; current-batch

@@ -212,10 +212,28 @@ evidence 無法完整讀取。
   多店共用文件或 Queue 既有值不能代替明示 Share ID。
 - `overage_method`、`overage_unit_price`：擷取同一 product row 或能唯一引用它的超額條款；
   tier／stairstep 不能簡化成 per-unit。
-- `deposit_type`：保存文件明示的 B2B／B2C 或支付方式語意。
-- `setup_fee`：Deposit 固定建立費。
+- `deposit_type`：必須先確認 canonical `product`，再依下表解讀；不可只依欄位名稱填值。
+- `setup_fee`：`Deposit` 固定建立費，沿用既有 mapping。即使同文件另有交易抽成，也不得將它移至
+  `Deposit-Commission` 或當成 commission rate。
 - `commission_rate`、`buy_in_price`：B2C `Deposit-Commission` 的交易抽成或買入價格；多種 payment
   method 分列。B2B 交易服務費依既有 B2B／Deposit row 語意保存，不產生 `Deposit-Commission`。
+
+### Product-aware Deposit type validation
+
+沿用 schema version 1 的 `deposit_type`，不新增或 migration 到 `payment_method`：
+
+| Canonical product | `deposit_type` 語意 | `Confirmed` 合法值 |
+| --- | --- | --- |
+| Deposit | 固定費 Deposit 類型 | `B2B`、`B2C` |
+| Deposit-Commission | 該筆交易費率的付款方式 | `Credit Card`、`Virtual ATM` |
+
+例如 `Deposit / B2C / setup_fee=5` 與 `Deposit-Commission / Credit Card / commission_rate=4.5`
+是分開的 facts；Virtual ATM row 可保留 `buy_in_price=98.5`，計算仍由既有 Apps Script 完成。
+`Deposit / Credit Card`、`Deposit / Virtual ATM` 與 `Deposit-Commission / B2B`、
+`Deposit-Commission / B2C` 都是 extraction 語意錯置，不是真實商業差異。Normalizer 對不合法的
+`Confirmed` 值（包括空值）回傳既有 error → `NEEDS_REVIEW`，不得直接判為 `MISMATCH`、
+自動換產品／改值或從 Queue 補值。既有大小寫／空白正規化與 field-state handling 保留；
+文件不足時仍使用 `NotMentioned`／`Unreadable`／`Ambiguous`，不得猜測類型或付款方式。
 
 ### Product-field applicability matrix
 

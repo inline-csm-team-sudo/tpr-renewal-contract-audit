@@ -2593,8 +2593,13 @@ function normalizeStructuredDocumentProducts_(data) {
 
     if (product === 'Deposit' || product === 'Deposit-Commission') {
       const depositType = structuredField_(row, 'deposit_type', label, { type:'text' });
+      const allowedTypes = product === 'Deposit' ? ['b2b', 'b2c'] : ['credit card', 'virtual atm'];
       if (depositType.error) errors.push(depositType.error);
-      else values.overageMethod = depositType.value;
+      else if (structuredState_(row.deposit_type.state) === 'confirmed' &&
+          allowedTypes.indexOf(depositType.value) < 0) {
+        errors.push(label + '.deposit_type「' + displayStructuredValue_(depositType.value) +
+          '」不適用於 ' + product + '；允許值：' + allowedTypes.join(', '));
+      } else values.overageMethod = depositType.value;
     } else {
       const overageMethod = structuredField_(row, 'overage_method', label, { type:'text' });
       if (overageMethod.error) errors.push(overageMethod.error);

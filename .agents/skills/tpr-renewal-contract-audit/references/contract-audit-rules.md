@@ -244,6 +244,13 @@ Queue 的證據連結可以是 Drive 單一檔案或資料夾。資料夾案件�
 
 ## 9. Deposit 規則
 
+Structured extraction 必須先判斷 product 再解讀現有 `deposit_type`：`Deposit` 的 Confirmed 值只可為
+`B2B`／`B2C`；`Deposit-Commission` 的同名欄位只可為 `Credit Card`／`Virtual ATM`。
+大小寫／空白正規化沿用現行處理；交叉誤填或其他不合法 Confirmed 值由 structured normalization
+fail closed → `NEEDS_REVIEW`，不是商業 `MISMATCH`。`Deposit.setup_fee` 仍為固定建立費並沿用原 mapping，
+不移至 Commission；其餘費率、buy-in 計算、年化與比較規則不變。詳細 extraction 規格見
+[`structured-extraction.md`](structured-extraction.md#product-aware-deposit-type-validation)。
+
 ### 9.1 B2B
 
 - B2B Deposit 不建立 `Deposit-Commission` 產品列。

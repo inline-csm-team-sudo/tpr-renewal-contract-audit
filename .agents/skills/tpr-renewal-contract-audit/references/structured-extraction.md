@@ -211,12 +211,29 @@ evidence 無法完整讀取。
 - `share_plan_id`：只在文件明示共享方案名稱／ID 或能唯一連結的群組時 `Confirmed`。店名相似、
   多店共用文件或 Queue 既有值不能代替明示 Share ID。
 - `overage_method`、`overage_unit_price`：擷取同一 product row 或能唯一引用它的超額條款；
-  tier／stairstep 不能簡化成 per-unit。
+  依下節 canonical gate 處理 method，保持 unit price 的原始事實與既有精確比較。
 - `deposit_type`：必須先確認 canonical `product`，再依下表解讀；不可只依欄位名稱填值。
 - `setup_fee`：`Deposit` 固定建立費，沿用既有 mapping。即使同文件另有交易抽成，也不得將它移至
   `Deposit-Commission` 或當成 commission rate。
 - `commission_rate`、`buy_in_price`：B2C `Deposit-Commission` 的交易抽成或買入價格；多種 payment
   method 分列。B2B 交易服務費依既有 B2B／Deposit row 語意保存，不產生 `Deposit-Commission`。
+
+### Canonical overage method gate
+
+對有商業 overage method 的產品，`Confirmed` 只允許 `per unit`、`tier`、`skm tier`，
+沿用外圍空白與大小寫正規化。這個 gate 只驗證分類，不新增或改寫既有計價語意，也不計算級距。
+文件必須能唯一、明確支持該分類；僅因出現多級距表格，不能自動判為 `tier`。
+
+Rare wording、未知類型、非 canonical 值（包括 `stairstep`），或無法唯一分類的多級距設計，
+使用 `overage_method={"state":"Ambiguous"}`，不填 `value`；將原始表格／文字與 source／locator
+保存在 sidecar，交既有 `NEEDS_REVIEW`／人工覆核。不可建立 `stairstep = tier` synonym，
+不可由 Queue expected method 推定或修正文件 facts，也不可把未知值寫成 Confirmed。
+若 reader 仍提交 `Confirmed(<unsupported value>)`，runtime 必須在商業比較前回傳 structured error
+→ `NEEDS_REVIEW`，不是 `MISMATCH`；即使 Queue 恰有相同字串也不能 Pass。
+
+此 gate 不改 Deposit／Deposit-Commission 的 product-aware type，也不改 Survey／Voice 的
+`NotApplicable` overage matrix。既有 `NotMentioned`／`NotApplicable` handling 與 overage unit price
+comparison 保留；明確且合法的 method 仍走既有 deterministic comparison。
 
 ### Product-aware Deposit type validation
 

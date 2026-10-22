@@ -57,6 +57,7 @@ const STRUCTURED_PRODUCT_FIELD_APPLICABILITY = {
   'Survey':['billing', 'price'],
   'Voice':['billing', 'price']
 };
+const STRUCTURED_CANONICAL_OVERAGE_METHODS = ['per unit', 'tier', 'skm tier'];
 const PLAN_REVIEW_HEADERS = [
   'Branch ID', 'Original Plan Family', 'New Plan Family', 'Complete Plan Match',
   'Reviewer', 'Reviewed At', 'Notes',
@@ -2651,7 +2652,16 @@ function normalizeStructuredDocumentProducts_(data) {
     } else {
       const overageMethod = structuredField_(row, 'overage_method', label, { type:'text' });
       if (overageMethod.error) errors.push(overageMethod.error);
-      else values.overageMethod = overageMethod.value;
+      else {
+        const applicable = STRUCTURED_PRODUCT_FIELD_APPLICABILITY[product];
+        const comparesOverage = !applicable || applicable.indexOf('overageMethod') >= 0;
+        if (comparesOverage && structuredState_(row.overage_method.state) === 'confirmed' &&
+            STRUCTURED_CANONICAL_OVERAGE_METHODS.indexOf(overageMethod.value) < 0) {
+          errors.push(label + '.overage_method「' + displayStructuredValue_(overageMethod.value) +
+            '」不是支援的 canonical overage type；需人工確認，不得由 Queue 推定');
+        }
+        values.overageMethod = overageMethod.value;
+      }
     }
 
     if (product === 'Deposit') {

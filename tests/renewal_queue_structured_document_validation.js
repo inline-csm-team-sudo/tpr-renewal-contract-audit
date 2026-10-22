@@ -123,6 +123,41 @@ let data = structuredData([product()]);
 let result = match(data);
 assert.strictEqual(result.result, 'MATCH');
 
+// Overage classification is document-only. Unsupported Confirmed text must
+// stop before commercial comparison, even when Queue contains the same text.
+['per unit', 'tier', 'skm tier'].forEach(method => {
+  const facts = structuredData([product({ overage_method:field('Confirmed', method) })]);
+  assert.strictEqual(match(facts, [queueRow({ overageMethod:method })]).result, 'MATCH', method);
+  const normalizedCase = structuredData([product({
+    overage_method:field('Confirmed', ' ' + method.toUpperCase() + ' ')
+  })]);
+  assert.strictEqual(match(normalizedCase, [queueRow({ overageMethod:method })]).result, 'MATCH');
+  assert.strictEqual(match(facts, [queueRow({ overageMethod:method, overagePrice:8 })]).result,
+    'MISMATCH', 'supported method must retain exact overage-price comparison');
+});
+['stairstep', 'unknown-method', 'multi-level custom', ''].forEach(method => {
+  const facts = structuredData([product({ overage_method:field('Confirmed', method) })]);
+  const before = JSON.stringify(facts);
+  ['tier', method].forEach(queueMethod => {
+    const unresolved = match(facts, [queueRow({ overageMethod:queueMethod })]);
+    assert.strictEqual(unresolved.result, 'NEEDS_REVIEW', method);
+    assert.match(unresolved.reason, /overage_method/);
+    assert.strictEqual(JSON.stringify(facts), before, 'Queue must never rewrite extraction facts');
+    assert.strictEqual(contract(reviewFor(facts), unresolved).result, 'Need Review');
+  });
+});
+const multiTierFacts = structuredData([product({
+  overage_method:{ state:'Ambiguous', source_id:'FILE1', locator:'page 3 / pricing table' },
+  overage_description:'Different usage ranges have different base charges and incremental rates'
+})]);
+assert.strictEqual(match(multiTierFacts, [queueRow({ overageMethod:'tier' })]).result, 'NEEDS_REVIEW');
+assert.strictEqual(match(structuredData([product()]), [queueRow({ overageMethod:'tier' })]).result,
+  'MISMATCH', 'different supported methods remain a commercial mismatch');
+['NotMentioned', 'NotApplicable'].forEach(state => {
+  assert.strictEqual(match(structuredData([product({ overage_method:field(state) })]),
+    [queueRow({ overageMethod:'' })]).result, 'MATCH', 'existing absent/non-applicable handling');
+});
+
 // Case 2: Wang Hui Suo regression. Manual TRUE cannot hide bonus 300 vs Queue 0.
 data = structuredData([product({ bonus_sets:field('Confirmed', 300) })]);
 result = match(data);
@@ -936,6 +971,14 @@ const base = {
   special:{ status:'Not Required', reason:'' },
   share:{ result:'Not Applicable', reason:'' }
 };
+
+const unresolvedOverageMatch = match(multiTierFacts, [queueRow({ overageMethod:'tier' })]);
+const unresolvedOverageGate = contract(reviewFor(multiTierFacts), unresolvedOverageMatch);
+const unresolvedOverageDecision = api.decideAuditStatus_(false, base.catalog, base.source,
+  base.longTerm, unresolvedOverageGate, base.bonus, base.plan, base.special, base.share);
+assert.strictEqual(unresolvedOverageGate.result, 'Need Review');
+assert.strictEqual(unresolvedOverageDecision.status, 'Need Contract');
+assert.notStrictEqual(unresolvedOverageDecision.status, 'Contract Mismatch');
 
 let decision = api.decideAuditStatus_(false, base.catalog, base.source, base.longTerm,
   base.contract, base.bonus, base.plan, { status:'Pending', reason:'特殊申請未核准' }, base.share);

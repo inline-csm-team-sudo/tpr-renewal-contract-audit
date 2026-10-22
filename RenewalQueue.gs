@@ -794,6 +794,10 @@ function runContractAudit() {
     ss.getSheetByName('Branch Tax ID Reference'), 'Branch ID', Object.keys(byBranch),
     activeContractReviewBatchId
   );
+  if (activeContractReviewBatchId) {
+    assertBranchTaxIdSnapshotIntegrity_(ss.getSheetByName('Branch Tax ID Reference'),
+      Object.keys(byBranch).map(branchId => ({ branchId })), activeContractReviewBatchId);
+  }
   const shareAudits = structuredShareGroupAudits_(
     byBranch, qx, evidence, branchTaxIds, shares, activeContractReviewBatchId
   );
@@ -1137,7 +1141,26 @@ function readChargebeeBranchTaxIds_(config, branchIds, importedAt) {
 
 function appendBranchTaxIdReferenceRows_(sheet, references, batchId) {
   const byBranch = {};
-  references.forEach(reference => { byBranch[reference.branchId] = reference; });
+  references.forEach(reference => {
+    if (typeof reference.taxId !== 'string' || byBranch[reference.branchId]) {
+      throw new Error('Tax ID snapshot input must have unique Branch IDs and exact string identifiers. Zero writes performed.');
+    }
+    byBranch[reference.branchId] = reference;
+  });
+  const values = sheet.getDataRange().getValues();
+  const plan = headerNameMigrationPlan_(values[0].map(String),
+    BRANCH_TAX_ID_REFERENCE_HEADERS, sheet.getName());
+  if (plan.missing.length) throw new Error('Tax ID snapshot missing headers: ' + plan.missing.join(', '));
+  const conflicts = values.slice(1).some(row =>
+    auditText_(row[plan.positions['Review Batch ID']]) === batchId &&
+    Object.prototype.hasOwnProperty.call(byBranch, auditText_(row[plan.positions['Branch ID']])));
+  if (conflicts) throw new Error('Tax ID snapshot batch rows already exist. Zero writes performed.');
+  if (references.length) {
+    // Set text BEFORE setValues: an identifier is not a numeric quantity.
+    // Only newly appended Tax ID cells are formatted; historical cells are untouched.
+    sheet.getRange(sheet.getLastRow() + 1, plan.positions['Tax ID'] + 1, references.length, 1)
+      .setNumberFormat('@');
+  }
   appendCurrentBatchKeyRows_(sheet, 'Branch ID', Object.keys(byBranch), batchId, branchId => {
     const reference = byBranch[branchId];
     return {
@@ -1152,6 +1175,31 @@ function appendBranchTaxIdReferenceRows_(sheet, references, batchId) {
       'Notes':reference.notes,
       'Review Batch ID':batchId
     };
+  });
+  assertBranchTaxIdSnapshotIntegrity_(sheet, references, batchId);
+}
+
+// Persistence guard only. Never pad identifiers or change Tax ID equality policy.
+// Preparation supplies source strings; Audit rechecks raw types without Chargebee.
+function assertBranchTaxIdSnapshotIntegrity_(sheet, references, batchId) {
+  if (!auditText_(batchId)) throw new Error('Tax ID snapshot integrity requires a current batch.');
+  SpreadsheetApp.flush();
+  const entries = indexedCurrentBatchReview_(sheet, 'Branch ID',
+    references.map(reference => reference.branchId), batchId);
+  references.forEach(reference => {
+    const entry = entries[reference.branchId];
+    if (!entry || entry.identityError) {
+      throw new Error('Tax ID snapshot integrity ' + reference.branchId + ': ' +
+        (entry && entry.identityError || 'missing row') + '. Audit blocked.');
+    }
+    const actual = entry.review['Tax ID'];
+    if (typeof actual !== 'string' ||
+        Object.prototype.hasOwnProperty.call(reference, 'taxId') && actual !== reference.taxId) {
+      throw new Error('Tax ID snapshot integrity row ' + entry.targetRowNumber + ' Branch ' +
+        reference.branchId + ': expected exact string=' +
+        (reference.taxId === undefined ? '(string type)' : JSON.stringify(reference.taxId)) +
+        ', actual=' + JSON.stringify(actual) + ' (' + typeof actual + '). Audit blocked; no corrective write performed.');
+    }
   });
 }
 

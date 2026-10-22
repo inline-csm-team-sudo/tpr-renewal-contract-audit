@@ -5,12 +5,13 @@ const vm = require('vm');
 const source = fs.readFileSync('RenewalQueue.gs', 'utf8') + `
 globalThis.__shareTest = {
   headerIndex_, indexedCurrentBatchReview_, normalizeTaxId_, readChargebeeBranchTaxIds_,
-  structuredShareGroupAudits_, queueShareOverageAudit_, writeShareGroupTraces_
+  structuredShareGroupAudits_, queueShareOverageAudit_, writeShareGroupTraces_,
+  appendBranchTaxIdReferenceRows_, assertBranchTaxIdSnapshotIntegrity_, runContractAudit
 };`;
 const sourceBooks = {};
 const context = {
   console,
-  SpreadsheetApp:{ openById:id => sourceBooks[id] }
+  SpreadsheetApp:{ openById:id => sourceBooks[id], flush:() => {} }
 };
 vm.runInNewContext(source, context);
 const api = context.__shareTest;
@@ -130,6 +131,97 @@ assert.match(imported[1].notes, /duplicate.*一致/i);
 assert.strictEqual(imported[2].status, 'NEEDS_REVIEW');
 assert.strictEqual(imported[3].status, 'NEEDS_REVIEW');
 
+// Exercise the real snapshot writer, including Sheets-style automatic numeric
+// coercion unless the destination was explicitly made Plain Text before writing.
+function taxSnapshotSheet(ignoreTextFormat = false) {
+  const values = [[
+    'Branch ID','Tax ID','Source Spreadsheet ID','Source Tab','Source Row',
+    'Imported At','Source Rows','Import Status','Notes','Review Batch ID'
+  ]];
+  const formats = {};
+  return {
+    values,
+    getName:() => 'Branch Tax ID Reference',
+    getLastRow:() => values.length,
+    getDataRange:() => ({ getValues:() => values.map(row => row.slice()) }),
+    getRange:(row, column, count = 1, width = 1) => ({
+      setNumberFormat:format => {
+        for (let r = row; r < row + count; r++) {
+          for (let c = column; c < column + width; c++) formats[r + ':' + c] = format;
+        }
+      },
+      setValues:rows => rows.forEach((input, r) => input.forEach((value, c) => {
+        const targetRow = row + r;
+        const targetColumn = column + c;
+        if (!values[targetRow - 1]) values[targetRow - 1] = [];
+        values[targetRow - 1][targetColumn - 1] =
+          (ignoreTextFormat || formats[targetRow + ':' + targetColumn] !== '@') &&
+          typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+      })),
+      getValues:() => Array.from({ length:count }, (_, r) =>
+        Array.from({ length:width }, (_, c) => values[row + r - 1]?.[column + c - 1] ?? ''))
+    })
+  };
+}
+const snapshot = taxSnapshotSheet();
+api.appendBranchTaxIdReferenceRows_(snapshot, [{
+  branchId:'GENERIC-A', taxId:'00885820', sourceSpreadsheetId:'CHARGEBEE',
+  sourceTab:'TW', sourceRow:2, importedAt:'NOW', sourceRows:'2', status:'PASS', notes:''
+}], 'BATCH');
+assert.strictEqual(snapshot.values[1][1], '00885820', 'persist the exact Tax ID string, not a number');
+
+const identifiers = ['00885820', '00558488', '12345678', '00001234', '0', ''];
+const reference = (taxId, index) => ({
+  branchId:'IDENTIFIER-' + index, taxId, sourceSpreadsheetId:'CHARGEBEE',
+  sourceTab:'TW', sourceRow:index + 2, importedAt:'NOW', sourceRows:String(index + 2),
+  status:taxId ? 'PASS' : 'NEEDS_REVIEW', notes:''
+});
+const exactReferences = identifiers.map(reference);
+const persisted = taxSnapshotSheet();
+persisted.values.push(['HISTORICAL', 12345, '', '', '', '', '', 'PASS', '', 'OLD-BATCH']);
+const historical = JSON.stringify(persisted.values[1]);
+api.appendBranchTaxIdReferenceRows_(persisted, exactReferences, 'BATCH');
+assert.deepStrictEqual(persisted.values.slice(2).map(row => row[1]), identifiers);
+assert.strictEqual(JSON.stringify(persisted.values[1]), historical);
+assert.doesNotThrow(() => api.assertBranchTaxIdSnapshotIntegrity_(persisted, exactReferences, 'BATCH'));
+// Audit uses snapshot raw types, not display values or a fresh Chargebee lookup.
+assert.match(api.runContractAudit.toString(), /assertBranchTaxIdSnapshotIntegrity_/);
+assert.doesNotThrow(() => api.assertBranchTaxIdSnapshotIntegrity_(persisted,
+  exactReferences.map(({ branchId }) => ({ branchId })), 'BATCH'));
+persisted.values[2][1] = '885820';
+assert.throws(() => api.assertBranchTaxIdSnapshotIntegrity_(persisted, exactReferences, 'BATCH'),
+  /expected exact string="00885820".*actual="885820"/);
+assert.strictEqual(persisted.values[2][1], '885820', 'guard never pads or retries');
+persisted.values[2][1] = 885820;
+assert.throws(() => api.assertBranchTaxIdSnapshotIntegrity_(persisted,
+  exactReferences.map(({ branchId }) => ({ branchId })), 'BATCH'), /number.*Audit blocked/);
+const faultyPersistence = taxSnapshotSheet(true);
+assert.throws(() => api.appendBranchTaxIdReferenceRows_(faultyPersistence,
+  [reference('00885820', 0)], 'BATCH'), /Tax ID snapshot integrity.*885820/);
+assert.strictEqual(faultyPersistence.values[1][1], 885820, 'no corrective second write');
+const badInput = taxSnapshotSheet();
+assert.throws(() => api.appendBranchTaxIdReferenceRows_(badInput,
+  [reference(885820, 0)], 'BATCH'), /exact string identifiers.*Zero writes/);
+assert.strictEqual(badInput.values.length, 1);
+
+// A numeric source cell with a zero-padded display must be read as its identifier
+// representation; raw-value access would lose information and is forbidden here.
+let rawSourceReads = 0;
+sourceBooks.FORMATTED_SOURCE = {
+  getSheetByName:() => ({
+    getLastRow:() => 2,
+    getRange:() => ({
+      getValues:() => { rawSourceReads++; return [[''], ['DISPLAY-ID', ...Array(15).fill(''), 885820]]; },
+      getDisplayValues:() => [['Branch ID', ...Array(15).fill(''), 'Tax ID'],
+        ['DISPLAY-ID', ...Array(15).fill(''), '00885820']]
+    })
+  })
+};
+assert.strictEqual(api.readChargebeeBranchTaxIds_(
+  { chargebeeImportSpreadsheetId:'FORMATTED_SOURCE' }, ['DISPLAY-ID'], 'NOW'
+).rows[0].taxId, '00885820');
+assert.strictEqual(rawSourceReads, 0);
+
 const two = [{ id:'A', name:'Alpha' }, { id:'B', name:'Beta' }];
 const full = manifest('M1', 'DOC-GROUP', 'GROUP', two);
 
@@ -138,6 +230,10 @@ const full = manifest('M1', 'DOC-GROUP', 'GROUP', two);
 let result = runGroup('GROUP', two, { A:[full], B:[full] }, { A:'123', B:'123' });
 assert.strictEqual(result.result, 'Pass');
 assert.strictEqual(JSON.stringify(result.trace.manifestIds), JSON.stringify(['M1']));
+assert.strictEqual(runGroup('GROUP', two, { A:[full], B:[full] },
+  { A:'00885820', B:'00885820' }).result, 'Pass');
+assert.strictEqual(runGroup('GROUP', two, { A:[full], B:[full] },
+  { A:'00885820', B:'885820' }).trace.expectedFields['Tax ID Check'], 'MANUAL REVIEW');
 
 // One Share ID may be covered by multiple current contracts; union is authority.
 const partA = manifest('MA', 'DOC-SPLIT', 'SPLIT', [two[0]]);
@@ -283,5 +379,13 @@ assert.strictEqual(indexed.GROUP.review.Status, 'OLD');
 // five manually-entered Pass fields.
 assert.doesNotMatch(api.structuredShareGroupAudits_.toString(), /Renewal DB/);
 assert.doesNotMatch(api.structuredShareGroupAudits_.toString(), /\['Status'\].*isPass/);
+
+// The exact Cloud smoke entrypoint must be runnable with every real source
+// denied. It invokes production persistence helpers against an in-memory sheet.
+vm.runInContext(fs.readFileSync('tests/renewal_queue_tax_id_cloud_smoke.gs', 'utf8'), context);
+const oldOpenById = context.SpreadsheetApp.openById;
+context.SpreadsheetApp.openById = () => { throw new Error('Cloud smoke must never open a workbook'); };
+assert.strictEqual(context.runTaxIdSnapshotCloudSmokeTest().result, 'PASS');
+context.SpreadsheetApp.openById = oldOpenById;
 
 console.log('Deterministic current-batch Share audit regression: all cases passed.');
